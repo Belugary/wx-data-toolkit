@@ -33,20 +33,23 @@ class MBI(ctypes.Structure):
         ("Protect", wt.DWORD), ("Type", wt.DWORD), ("_pad2", wt.DWORD),
     ]
 
-def get_pid():
+def get_pids():
+    """返回所有 Weixin.exe 进程的 (pid, mem_kb) 列表，按内存降序"""
     import subprocess
     r = subprocess.run(["tasklist","/FI","IMAGENAME eq Weixin.exe","/FO","CSV","/NH"],
                        capture_output=True, text=True)
-    best = (0,0)
+    pids = []
     for line in r.stdout.strip().split('\n'):
         if not line.strip(): continue
         p = line.strip('"').split('","')
         if len(p)>=5:
             pid=int(p[1]); mem=int(p[4].replace(',','').replace(' K','').strip() or '0')
-            if mem>best[1]: best=(pid,mem)
-    if not best[0]: print("[ERROR] Weixin.exe 未运行"); sys.exit(1)
-    print(f"[+] Weixin.exe PID={best[0]} ({best[1]//1024}MB)")
-    return best[0]
+            pids.append((pid, mem))
+    if not pids: raise RuntimeError("Weixin.exe 未运行")
+    pids.sort(key=lambda x: x[1], reverse=True)
+    for pid, mem in pids:
+        print(f"[+] Weixin.exe PID={pid} ({mem//1024}MB)")
+    return pids
 
 def read_mem(h, addr, sz):
     buf = ctypes.create_string_buffer(sz)
@@ -113,98 +116,107 @@ def main():
     for salt_hex, dbs in sorted(salt_to_dbs.items(), key=lambda x: len(x[1]), reverse=True):
         print(f"  salt {salt_hex}: {', '.join(dbs)}")
 
-    # 2. 打开进程
-    pid = get_pid()
-    h = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
-    if not h:
-        print("[ERROR] 无法打开进程"); sys.exit(1)
+    # 2. 打开所有微信进程
+    pids = get_pids()
 
-    regions = enum_regions(h)
-    total_mb = sum(s for _,s in regions)/1024/1024
-    print(f"[+] 可读内存: {len(regions)} 区域, {total_mb:.0f}MB")
-
-    # 3. 搜索所有 x'<hex>' 模式
-    print(f"\n搜索 x'<hex>' 缓存密钥...")
     hex_re = re.compile(b"x'([0-9a-fA-F]{64,192})'")
-
-    # 结果: salt_hex -> enc_key_hex
-    key_map = {}
+    key_map = {}  # salt_hex -> enc_key_hex
+    remaining_salts = set(salt_to_dbs.keys())
     all_hex_matches = 0
     t0 = time.time()
 
-    for reg_idx, (base, size) in enumerate(regions):
-        data = read_mem(h, base, size)
-        if not data: continue
+    for proc_idx, (pid, mem) in enumerate(pids):
+        h = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
+        if not h:
+            print(f"[WARN] 无法打开进程 PID={pid}，跳过")
+            continue
 
-        for m in hex_re.finditer(data):
-            hex_str = m.group(1).decode()
-            addr = base + m.start()
-            all_hex_matches += 1
-            hex_len = len(hex_str)
+        try:
+            regions = enum_regions(h)
+            total_bytes = sum(s for _,s in regions)
+            total_mb = total_bytes/1024/1024
+            print(f"\n[*] 扫描 PID={pid} ({total_mb:.0f}MB, {len(regions)} 区域)")
 
-            if hex_len == 96:
-                # enc_key(32bytes=64hex) + salt(16bytes=32hex)
-                enc_key_hex = hex_str[:64]
-                salt_hex = hex_str[64:]
+            scanned_bytes = 0
+            for reg_idx, (base, size) in enumerate(regions):
+                data = read_mem(h, base, size)
+                scanned_bytes += size
+                if not data: continue
 
-                if salt_hex in salt_to_dbs and salt_hex not in key_map:
-                    # 验证!
-                    enc_key = bytes.fromhex(enc_key_hex)
-                    # 找到对应的page1
-                    for rel, path, sz, s, page1 in db_files:
-                        if s == salt_hex:
-                            if verify_key_for_db(enc_key, page1):
-                                key_map[salt_hex] = enc_key_hex
-                                dbs = salt_to_dbs[salt_hex]
-                                print(f"\n  [FOUND] salt={salt_hex}")
-                                print(f"    enc_key={enc_key_hex}")
-                                print(f"    地址: 0x{addr:016X}")
-                                print(f"    数据库: {', '.join(dbs)}")
-                            break
+                for m in hex_re.finditer(data):
+                    hex_str = m.group(1).decode()
+                    addr = base + m.start()
+                    all_hex_matches += 1
+                    hex_len = len(hex_str)
 
-            elif hex_len == 64:
-                # 只有enc_key, 没有salt - 需要逐个DB试
-                enc_key_hex = hex_str
-                enc_key = bytes.fromhex(enc_key_hex)
-                for rel, path, sz, salt_hex_db, page1 in db_files:
-                    if salt_hex_db not in key_map:
-                        if verify_key_for_db(enc_key, page1):
-                            key_map[salt_hex_db] = enc_key_hex
-                            dbs = salt_to_dbs[salt_hex_db]
-                            print(f"\n  [FOUND] salt={salt_hex_db}")
-                            print(f"    enc_key={enc_key_hex}")
-                            print(f"    地址: 0x{addr:016X}")
-                            print(f"    数据库: {', '.join(dbs)}")
-                            break
+                    if hex_len == 96:
+                        enc_key_hex = hex_str[:64]
+                        salt_hex = hex_str[64:]
 
-            elif hex_len > 96 and hex_len % 2 == 0:
-                # 可能是 enc_key + hmac_key + salt 或其他格式
-                # 取前64作为enc_key, 后32作为salt
-                enc_key_hex = hex_str[:64]
-                salt_hex = hex_str[-32:]
+                        if salt_hex in remaining_salts:
+                            enc_key = bytes.fromhex(enc_key_hex)
+                            for rel, path, sz, s, page1 in db_files:
+                                if s == salt_hex:
+                                    if verify_key_for_db(enc_key, page1):
+                                        key_map[salt_hex] = enc_key_hex
+                                        remaining_salts.discard(salt_hex)
+                                        dbs = salt_to_dbs[salt_hex]
+                                        print(f"\n  [FOUND] salt={salt_hex}")
+                                        print(f"    enc_key={enc_key_hex}")
+                                        print(f"    PID={pid} 地址: 0x{addr:016X}")
+                                        print(f"    数据库: {', '.join(dbs)}")
+                                    break
 
-                if salt_hex in salt_to_dbs and salt_hex not in key_map:
-                    enc_key = bytes.fromhex(enc_key_hex)
-                    for rel, path, sz, s, page1 in db_files:
-                        if s == salt_hex:
-                            if verify_key_for_db(enc_key, page1):
-                                key_map[salt_hex] = enc_key_hex
-                                dbs = salt_to_dbs[salt_hex]
-                                print(f"\n  [FOUND] salt={salt_hex} (long hex {hex_len})")
-                                print(f"    enc_key={enc_key_hex}")
-                                print(f"    地址: 0x{addr:016X}")
-                                print(f"    数据库: {', '.join(dbs)}")
-                            break
+                    elif hex_len == 64:
+                        if not remaining_salts:
+                            continue
+                        enc_key_hex = hex_str
+                        enc_key = bytes.fromhex(enc_key_hex)
+                        for rel, path, sz, salt_hex_db, page1 in db_files:
+                            if salt_hex_db in remaining_salts:
+                                if verify_key_for_db(enc_key, page1):
+                                    key_map[salt_hex_db] = enc_key_hex
+                                    remaining_salts.discard(salt_hex_db)
+                                    dbs = salt_to_dbs[salt_hex_db]
+                                    print(f"\n  [FOUND] salt={salt_hex_db}")
+                                    print(f"    enc_key={enc_key_hex}")
+                                    print(f"    PID={pid} 地址: 0x{addr:016X}")
+                                    print(f"    数据库: {', '.join(dbs)}")
+                                    break
 
-        # 进度
-        if (reg_idx + 1) % 200 == 0:
-            elapsed = time.time() - t0
-            progress = sum(s for b,s in regions[:reg_idx+1]) / sum(s for _,s in regions) * 100
-            print(f"  [{progress:.1f}%] {len(key_map)}/{len(salt_to_dbs)} salts matched, "
-                  f"{all_hex_matches} hex patterns, {elapsed:.1f}s")
+                    elif hex_len > 96 and hex_len % 2 == 0:
+                        enc_key_hex = hex_str[:64]
+                        salt_hex = hex_str[-32:]
+
+                        if salt_hex in remaining_salts:
+                            enc_key = bytes.fromhex(enc_key_hex)
+                            for rel, path, sz, s, page1 in db_files:
+                                if s == salt_hex:
+                                    if verify_key_for_db(enc_key, page1):
+                                        key_map[salt_hex] = enc_key_hex
+                                        remaining_salts.discard(salt_hex)
+                                        dbs = salt_to_dbs[salt_hex]
+                                        print(f"\n  [FOUND] salt={salt_hex} (long hex {hex_len})")
+                                        print(f"    enc_key={enc_key_hex}")
+                                        print(f"    PID={pid} 地址: 0x{addr:016X}")
+                                        print(f"    数据库: {', '.join(dbs)}")
+                                    break
+
+                if (reg_idx + 1) % 200 == 0:
+                    elapsed = time.time() - t0
+                    progress = scanned_bytes / total_bytes * 100 if total_bytes else 100
+                    print(f"  [{progress:.1f}%] {len(key_map)}/{len(salt_to_dbs)} salts matched, "
+                          f"{all_hex_matches} hex patterns, {elapsed:.1f}s")
+        finally:
+            kernel32.CloseHandle(h)
+
+        # 所有 salt 都找到了就提前退出
+        if not remaining_salts:
+            print(f"\n[+] 所有密钥已找到，跳过剩余进程")
+            break
 
     elapsed = time.time() - t0
-    print(f"\n扫描完成: {elapsed:.1f}s, {all_hex_matches} hex模式")
+    print(f"\n扫描完成: {elapsed:.1f}s, {len(pids)} 个进程, {all_hex_matches} hex模式")
 
     # 4. 如果有未找到的salt，用已找到的key做交叉验证
     # (WCDB有时对同一passphrase的不同DB用同一enc_key，如果salt相同)
@@ -238,6 +250,12 @@ def main():
         else:
             print(f"  MISSING: {rel} (salt={salt_hex})")
 
+    if not result:
+        print(f"\n[!] 未提取到任何密钥，保留已有的 {OUT_FILE}（如存在）")
+        raise RuntimeError("未能从任何微信进程中提取到密钥")
+
+    # 写入密钥并记录对应的 db_dir，防止切换账号后误复用
+    result["_db_dir"] = DB_DIR
     with open(OUT_FILE, 'w') as f:
         json.dump(result, f, indent=2)
     print(f"\n密钥保存到: {OUT_FILE}")
@@ -248,8 +266,10 @@ def main():
         for rel in missing:
             print(f"  {rel}")
 
-    kernel32.CloseHandle(h)
-
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        print(f"\n[ERROR] {e}")
+        sys.exit(1)

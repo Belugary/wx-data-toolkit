@@ -38,15 +38,18 @@ WCDB (微信的 SQLCipher 封装) 会在进程内存中缓存派生后的 raw ke
 pip install pycryptodome
 ```
 
-### 1. 配置
+### 快速开始
 
-复制配置模板并修改：
+确保微信正在运行，以**管理员权限**执行：
 
 ```bash
-copy config.example.json config.json
+python main.py            # 实时消息监听 (Web UI)
+python main.py decrypt    # 解密全部数据库到 decrypted/
 ```
 
-编辑 `config.json`：
+程序会自动完成：配置检测 → 密钥提取 → 启动。首次运行会自动检测微信数据目录并生成 `config.json`。
+
+如果自动检测失败（例如微信安装在非默认位置），手动创建 `config.json`：
 ```json
 {
     "db_dir": "D:\\xwechat_files\\你的微信ID\\db_storage",
@@ -58,33 +61,9 @@ copy config.example.json config.json
 
 `db_dir` 路径可以在 微信设置 → 文件管理 中找到。
 
-### 2. 提取密钥
+### Web UI 说明
 
-确保微信正在运行，以**管理员权限**运行：
-
-```bash
-python find_all_keys.py
-```
-
-密钥将保存到 `all_keys.json`。
-
-### 3. 解密数据库
-
-```bash
-python decrypt_db.py
-```
-
-解密后的数据库保存在 `decrypted/` 目录，可以直接用 SQLite 工具打开。
-
-### 4. 实时消息监听
-
-#### Web UI (推荐)
-
-```bash
-python monitor_web.py
-```
-
-打开 http://localhost:5678 查看实时消息流。
+`python main.py` 启动后打开 http://localhost:5678 查看实时消息流。
 
 - 30ms 轮询 WAL 文件变化 (mtime)
 - 检测到变化后全量解密 + WAL patch (~70ms)
@@ -92,15 +71,7 @@ python monitor_web.py
 - 总延迟约 100ms
 - **图片消息内联预览**（支持旧 XOR / V1 / V2 三种 .dat 加密格式）
 
-#### 命令行
-
-```bash
-python monitor.py
-```
-
-每 3 秒轮询一次，在终端显示新消息。
-
-### 5. MCP Server (Claude AI 集成)
+### MCP Server (Claude AI 集成)
 
 将微信数据查询能力接入 [Claude Code](https://claude.ai/claude-code)，让 AI 直接读取你的微信消息。
 
@@ -138,11 +109,11 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 | `get_contacts(query, limit)` | 搜索/列出联系人 |
 | `get_new_messages()` | 获取自上次调用以来的新消息 |
 
-前置条件：需要先完成步骤 1-2（配置 + 提取密钥）。
+前置条件：需要先运行 `python main.py` 或 `python find_all_keys.py` 完成密钥提取。
 
 **[查看使用案例 →](USAGE.md)**
 
-### 6. 图片解密 (V2 格式)
+### 图片解密 (V2 格式)
 
 微信 4.0 (2025-08+) 的 .dat 图片文件使用 AES-128-ECB + XOR 混合加密 (V2 格式)。AES 密钥需要从运行中的微信进程内存中提取：
 
@@ -163,7 +134,8 @@ python find_image_key.py
 
 | 文件 | 说明 |
 |------|------|
-| `config.py` | 配置加载器 |
+| `main.py` | **一键启动入口** — 自动配置、提取密钥、启动服务 |
+| `config.py` | 配置加载器（自动检测微信数据目录） |
 | `find_all_keys.py` | 从微信进程内存提取所有数据库密钥 |
 | `decrypt_db.py` | 全量解密所有数据库 |
 | `mcp_server.py` | MCP Server，让 Claude AI 查询微信数据 |
