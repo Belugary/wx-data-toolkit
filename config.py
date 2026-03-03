@@ -35,13 +35,20 @@ def auto_detect_db_dir():
     data_roots = []
     for ini_file in glob.glob(os.path.join(config_dir, "*.ini")):
         try:
-            with open(ini_file, "r", encoding="utf-8") as f:
-                content = f.read(1024).strip()
-            if not content or "\n" in content or "\x00" in content:
+            # 微信 ini 可能是 utf-8 或 gbk 编码（中文路径）
+            content = None
+            for enc in ("utf-8", "gbk"):
+                try:
+                    with open(ini_file, "r", encoding=enc) as f:
+                        content = f.read(1024).strip()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not content or any(c in content for c in "\n\r\x00"):
                 continue
             if os.path.isdir(content):
                 data_roots.append(content)
-        except (OSError, UnicodeDecodeError):
+        except OSError:
             continue
 
     # 在每个根目录下搜索 xwechat_files\*\db_storage
@@ -82,8 +89,12 @@ def auto_detect_db_dir():
 def load_config():
     cfg = {}
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            cfg = json.load(f)
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+        except json.JSONDecodeError:
+            print(f"[!] {CONFIG_FILE} 格式损坏，将使用默认配置")
+            cfg = {}
 
     # db_dir 缺失或仍为模板值时，尝试自动检测
     db_dir = cfg.get("db_dir", "")
@@ -91,7 +102,6 @@ def load_config():
         detected = auto_detect_db_dir()
         if detected:
             print(f"[+] 自动检测到微信数据目录: {detected}")
-            cfg["db_dir"] = detected
             # 合并默认值并保存
             cfg = {**_DEFAULT, **cfg, "db_dir": detected}
             with open(CONFIG_FILE, "w") as f:

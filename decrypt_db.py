@@ -118,6 +118,7 @@ def main():
     with open(KEYS_FILE) as f:
         keys = json.load(f)
 
+    keys.pop("_db_dir", None)
     print(f"\n加载 {len(keys)} 个数据库密钥")
     print(f"输出目录: {OUT_DIR}")
     os.makedirs(OUT_DIR, exist_ok=True)

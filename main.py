@@ -6,7 +6,6 @@ python main.py decrypt  # 提取密钥 + 解密全部数据库
 """
 import json
 import os
-import subprocess
 import sys
 
 import functools
@@ -15,21 +14,29 @@ print = functools.partial(print, flush=True)
 
 def check_wechat_running():
     """检查微信是否在运行，返回 True/False"""
-    r = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
-        capture_output=True, text=True,
-    )
-    for line in r.stdout.strip().split("\n"):
-        if "Weixin.exe" in line:
-            return True
-    return False
+    from find_all_keys import get_pids
+    try:
+        get_pids()
+        return True
+    except RuntimeError:
+        return False
 
 
-def ensure_keys(keys_file):
-    """确保密钥文件存在，不存在则自动提取"""
+def ensure_keys(keys_file, db_dir):
+    """确保密钥文件存在且匹配当前 db_dir，否则重新提取"""
     if os.path.exists(keys_file):
-        with open(keys_file) as f:
-            keys = json.load(f)
+        try:
+            with open(keys_file) as f:
+                keys = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            keys = {}
+        # 检查密钥是否匹配当前 db_dir（防止切换账号后误复用旧密钥）
+        saved_dir = keys.pop("_db_dir", None)
+        if saved_dir and os.path.normcase(os.path.normpath(saved_dir)) != os.path.normcase(os.path.normpath(db_dir)):
+            print(f"[!] 密钥文件对应的目录已变更，需要重新提取")
+            print(f"    旧: {saved_dir}")
+            print(f"    新: {db_dir}")
+            keys = {}
         if keys:
             print(f"[+] 已有 {len(keys)} 个数据库密钥")
             return
@@ -37,15 +44,22 @@ def ensure_keys(keys_file):
     print("[*] 密钥文件不存在，正在从微信进程提取...")
     print()
     from find_all_keys import main as extract_keys
-    extract_keys()
+    try:
+        extract_keys()
+    except RuntimeError as e:
+        print(f"\n[!] 密钥提取失败: {e}")
+        sys.exit(1)
     print()
 
     # 提取后再次检查
     if not os.path.exists(keys_file):
         print("[!] 密钥提取失败")
         sys.exit(1)
-    with open(keys_file) as f:
-        keys = json.load(f)
+    try:
+        with open(keys_file) as f:
+            keys = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        keys = {}
     if not keys:
         print("[!] 未能提取到任何密钥")
         print("    可能原因：选择了错误的微信数据目录，或微信需要重启")
@@ -71,7 +85,7 @@ def main():
     print("[+] 微信进程运行中")
 
     # 3. 提取密钥
-    ensure_keys(cfg["keys_file"])
+    ensure_keys(cfg["keys_file"], cfg["db_dir"])
 
     # 4. 根据子命令执行
     cmd = sys.argv[1] if len(sys.argv) > 1 else "web"

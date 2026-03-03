@@ -121,6 +121,7 @@ def main():
 
     hex_re = re.compile(b"x'([0-9a-fA-F]{64,192})'")
     key_map = {}  # salt_hex -> enc_key_hex
+    remaining_salts = set(salt_to_dbs.keys())
     all_hex_matches = 0
     t0 = time.time()
 
@@ -130,78 +131,87 @@ def main():
             print(f"[WARN] 无法打开进程 PID={pid}，跳过")
             continue
 
-        regions = enum_regions(h)
-        total_mb = sum(s for _,s in regions)/1024/1024
-        print(f"\n[*] 扫描 PID={pid} ({total_mb:.0f}MB, {len(regions)} 区域)")
+        try:
+            regions = enum_regions(h)
+            total_bytes = sum(s for _,s in regions)
+            total_mb = total_bytes/1024/1024
+            print(f"\n[*] 扫描 PID={pid} ({total_mb:.0f}MB, {len(regions)} 区域)")
 
-        for reg_idx, (base, size) in enumerate(regions):
-            data = read_mem(h, base, size)
-            if not data: continue
+            scanned_bytes = 0
+            for reg_idx, (base, size) in enumerate(regions):
+                data = read_mem(h, base, size)
+                scanned_bytes += size
+                if not data: continue
 
-            for m in hex_re.finditer(data):
-                hex_str = m.group(1).decode()
-                addr = base + m.start()
-                all_hex_matches += 1
-                hex_len = len(hex_str)
+                for m in hex_re.finditer(data):
+                    hex_str = m.group(1).decode()
+                    addr = base + m.start()
+                    all_hex_matches += 1
+                    hex_len = len(hex_str)
 
-                if hex_len == 96:
-                    enc_key_hex = hex_str[:64]
-                    salt_hex = hex_str[64:]
+                    if hex_len == 96:
+                        enc_key_hex = hex_str[:64]
+                        salt_hex = hex_str[64:]
 
-                    if salt_hex in salt_to_dbs and salt_hex not in key_map:
+                        if salt_hex in remaining_salts:
+                            enc_key = bytes.fromhex(enc_key_hex)
+                            for rel, path, sz, s, page1 in db_files:
+                                if s == salt_hex:
+                                    if verify_key_for_db(enc_key, page1):
+                                        key_map[salt_hex] = enc_key_hex
+                                        remaining_salts.discard(salt_hex)
+                                        dbs = salt_to_dbs[salt_hex]
+                                        print(f"\n  [FOUND] salt={salt_hex}")
+                                        print(f"    enc_key={enc_key_hex}")
+                                        print(f"    PID={pid} 地址: 0x{addr:016X}")
+                                        print(f"    数据库: {', '.join(dbs)}")
+                                    break
+
+                    elif hex_len == 64:
+                        if not remaining_salts:
+                            continue
+                        enc_key_hex = hex_str
                         enc_key = bytes.fromhex(enc_key_hex)
-                        for rel, path, sz, s, page1 in db_files:
-                            if s == salt_hex:
+                        for rel, path, sz, salt_hex_db, page1 in db_files:
+                            if salt_hex_db in remaining_salts:
                                 if verify_key_for_db(enc_key, page1):
-                                    key_map[salt_hex] = enc_key_hex
-                                    dbs = salt_to_dbs[salt_hex]
-                                    print(f"\n  [FOUND] salt={salt_hex}")
+                                    key_map[salt_hex_db] = enc_key_hex
+                                    remaining_salts.discard(salt_hex_db)
+                                    dbs = salt_to_dbs[salt_hex_db]
+                                    print(f"\n  [FOUND] salt={salt_hex_db}")
                                     print(f"    enc_key={enc_key_hex}")
                                     print(f"    PID={pid} 地址: 0x{addr:016X}")
                                     print(f"    数据库: {', '.join(dbs)}")
-                                break
+                                    break
 
-                elif hex_len == 64:
-                    enc_key_hex = hex_str
-                    enc_key = bytes.fromhex(enc_key_hex)
-                    for rel, path, sz, salt_hex_db, page1 in db_files:
-                        if salt_hex_db not in key_map:
-                            if verify_key_for_db(enc_key, page1):
-                                key_map[salt_hex_db] = enc_key_hex
-                                dbs = salt_to_dbs[salt_hex_db]
-                                print(f"\n  [FOUND] salt={salt_hex_db}")
-                                print(f"    enc_key={enc_key_hex}")
-                                print(f"    PID={pid} 地址: 0x{addr:016X}")
-                                print(f"    数据库: {', '.join(dbs)}")
-                                break
+                    elif hex_len > 96 and hex_len % 2 == 0:
+                        enc_key_hex = hex_str[:64]
+                        salt_hex = hex_str[-32:]
 
-                elif hex_len > 96 and hex_len % 2 == 0:
-                    enc_key_hex = hex_str[:64]
-                    salt_hex = hex_str[-32:]
+                        if salt_hex in remaining_salts:
+                            enc_key = bytes.fromhex(enc_key_hex)
+                            for rel, path, sz, s, page1 in db_files:
+                                if s == salt_hex:
+                                    if verify_key_for_db(enc_key, page1):
+                                        key_map[salt_hex] = enc_key_hex
+                                        remaining_salts.discard(salt_hex)
+                                        dbs = salt_to_dbs[salt_hex]
+                                        print(f"\n  [FOUND] salt={salt_hex} (long hex {hex_len})")
+                                        print(f"    enc_key={enc_key_hex}")
+                                        print(f"    PID={pid} 地址: 0x{addr:016X}")
+                                        print(f"    数据库: {', '.join(dbs)}")
+                                    break
 
-                    if salt_hex in salt_to_dbs and salt_hex not in key_map:
-                        enc_key = bytes.fromhex(enc_key_hex)
-                        for rel, path, sz, s, page1 in db_files:
-                            if s == salt_hex:
-                                if verify_key_for_db(enc_key, page1):
-                                    key_map[salt_hex] = enc_key_hex
-                                    dbs = salt_to_dbs[salt_hex]
-                                    print(f"\n  [FOUND] salt={salt_hex} (long hex {hex_len})")
-                                    print(f"    enc_key={enc_key_hex}")
-                                    print(f"    PID={pid} 地址: 0x{addr:016X}")
-                                    print(f"    数据库: {', '.join(dbs)}")
-                                break
-
-            if (reg_idx + 1) % 200 == 0:
-                elapsed = time.time() - t0
-                progress = sum(s for b,s in regions[:reg_idx+1]) / sum(s for _,s in regions) * 100
-                print(f"  [{progress:.1f}%] {len(key_map)}/{len(salt_to_dbs)} salts matched, "
-                      f"{all_hex_matches} hex patterns, {elapsed:.1f}s")
-
-        kernel32.CloseHandle(h)
+                if (reg_idx + 1) % 200 == 0:
+                    elapsed = time.time() - t0
+                    progress = scanned_bytes / total_bytes * 100 if total_bytes else 100
+                    print(f"  [{progress:.1f}%] {len(key_map)}/{len(salt_to_dbs)} salts matched, "
+                          f"{all_hex_matches} hex patterns, {elapsed:.1f}s")
+        finally:
+            kernel32.CloseHandle(h)
 
         # 所有 salt 都找到了就提前退出
-        if len(key_map) == len(salt_to_dbs):
+        if not remaining_salts:
             print(f"\n[+] 所有密钥已找到，跳过剩余进程")
             break
 
@@ -240,6 +250,12 @@ def main():
         else:
             print(f"  MISSING: {rel} (salt={salt_hex})")
 
+    if not result:
+        print(f"\n[!] 未提取到任何密钥，保留已有的 {OUT_FILE}（如存在）")
+        raise RuntimeError("未能从任何微信进程中提取到密钥")
+
+    # 写入密钥并记录对应的 db_dir，防止切换账号后误复用
+    result["_db_dir"] = DB_DIR
     with open(OUT_FILE, 'w') as f:
         json.dump(result, f, indent=2)
     print(f"\n密钥保存到: {OUT_FILE}")
@@ -251,6 +267,9 @@ def main():
             print(f"  {rel}")
 
 
-
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        print(f"\n[ERROR] {e}")
+        sys.exit(1)
