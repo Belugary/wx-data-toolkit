@@ -61,7 +61,7 @@ def auto_detect_db_dir():
         # 非交互环境（MCP、无 stdin 管道等）直接取第一个
         if not sys.stdin.isatty():
             return candidates[0]
-        print("[!] 检测到多个微信数据目录:")
+        print("[!] 检测到多个微信数据目录（请选择当前正在运行的微信账号）:")
         for i, c in enumerate(candidates, 1):
             print(f"    {i}. {c}")
         print("    0. 跳过，稍后手动配置")
