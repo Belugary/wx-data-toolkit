@@ -1471,6 +1471,42 @@ a.msg-link{text-decoration:none;color:inherit}
 .empty .icon{font-size:48px;margin-bottom:12px}
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
+/* 设置面板 */
+.settings-btn{background:none;border:1px solid rgba(255,255,255,.15);color:#888;font-size:16px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all .2s}
+.settings-btn:hover{color:#ccc;border-color:rgba(255,255,255,.3)}
+.settings-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:900}
+.settings-overlay.show{display:block}
+.settings-panel{position:fixed;top:0;right:-420px;width:400px;height:100%;background:#12121a;border-left:1px solid rgba(255,255,255,.1);z-index:901;transition:right .3s ease;display:flex;flex-direction:column;overflow:hidden}
+.settings-panel.show{right:0}
+.sp-header{padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.sp-header h2{font-size:16px;color:#e0e0e0;font-weight:600}
+.sp-close{background:none;border:none;color:#666;font-size:20px;cursor:pointer;padding:4px 8px}
+.sp-close:hover{color:#ccc}
+.sp-body{flex:1;overflow-y:auto;padding:16px 20px}
+.sp-section{margin-bottom:20px}
+.sp-section h3{font-size:13px;color:#888;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
+.sp-toggle{display:flex;align-items:center;justify-content:space-between;padding:8px 0}
+.sp-toggle label{font-size:13px;color:#ccc}
+.switch{position:relative;width:40px;height:22px;flex-shrink:0}
+.switch input{display:none}
+.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#333;border-radius:11px;transition:.3s}
+.switch input:checked+.slider{background:#4caf50}
+.switch .slider:before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.switch input:checked+.slider:before{transform:translateX(18px)}
+.rule-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px;margin-bottom:10px}
+.rule-card .rule-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.rule-card .rule-del{background:none;border:none;color:#666;cursor:pointer;font-size:14px;padding:2px 6px}
+.rule-card .rule-del:hover{color:#ef5350}
+.rule-card input[type=text]{width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:4px;padding:6px 8px;color:#ccc;font-size:12px;margin-bottom:6px;outline:none}
+.rule-card input[type=text]:focus{border-color:rgba(79,195,247,.5)}
+.rule-card input[type=text]::placeholder{color:#555}
+.rule-opts{display:flex;gap:12px;margin-top:4px}
+.rule-opts label{font-size:11px;color:#999;display:flex;align-items:center;gap:4px;cursor:pointer}
+.rule-opts input[type=checkbox]{accent-color:#4caf50}
+.add-rule-btn{width:100%;padding:8px;background:rgba(79,195,247,.1);border:1px dashed rgba(79,195,247,.3);border-radius:6px;color:#4fc3f7;font-size:12px;cursor:pointer;transition:all .2s}
+.add-rule-btn:hover{background:rgba(79,195,247,.2)}
+/* 通知高亮 */
+.msg.notify-hl{border-left:3px solid #ffd54f;background:rgba(255,213,79,.08);box-shadow:0 0 12px rgba(255,213,79,.1)}
 </style>
 </head>
 <body>
@@ -1478,6 +1514,23 @@ a.msg-link{text-decoration:none;color:inherit}
 <h1>WeChat Monitor</h1>
 <div class="status ok" id="st">SSE 实时</div>
 <div class="stats"><span id="cnt">0 消息</span><span id="perf"></span></div>
+<button class="settings-btn" onclick="toggleSettings()" title="通知设置">⚙️</button>
+</div>
+<div class="settings-overlay" id="settingsOverlay" onclick="toggleSettings()"></div>
+<div class="settings-panel" id="settingsPanel">
+<div class="sp-header"><h2>通知设置</h2><button class="sp-close" onclick="toggleSettings()">&times;</button></div>
+<div class="sp-body">
+<div class="sp-section">
+<h3>全局</h3>
+<div class="sp-toggle"><label>启用通知过滤</label><label class="switch"><input type="checkbox" id="notifyEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
+<div class="sp-toggle"><label>声音提醒</label><label class="switch"><input type="checkbox" id="soundEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
+</div>
+<div class="sp-section">
+<h3>规则</h3>
+<div id="rulesContainer"></div>
+<button class="add-rule-btn" onclick="addRule()">+ 添加规则</button>
+</div>
+</div>
 </div>
 <div id="lightbox" onclick="this.classList.remove('show')"><img id="lb-img" /></div>
 <div class="messages" id="msgs">
@@ -1542,6 +1595,91 @@ function renderContent(m){
   return linkify(wxEmoji(raw));
 }
 
+// ---- 通知过滤 ----
+const DEFAULT_NOTIFY = {enabled:false, sound_enabled:true, rules:[]};
+function loadNotifySettings(){
+  try{ return JSON.parse(localStorage.getItem('wechat_notify'))||DEFAULT_NOTIFY; }catch(e){ return DEFAULT_NOTIFY; }
+}
+function saveNotifySettings(){
+  const s = {
+    enabled: document.getElementById('notifyEnabled').checked,
+    sound_enabled: document.getElementById('soundEnabled').checked,
+    rules: collectRules()
+  };
+  localStorage.setItem('wechat_notify', JSON.stringify(s));
+}
+function collectRules(){
+  const rules=[];
+  document.querySelectorAll('.rule-card').forEach(card=>{
+    const inputs=card.querySelectorAll('input[type=text]');
+    const checks=card.querySelectorAll('input[type=checkbox]');
+    rules.push({
+      group_name: inputs[0]?.value||'',
+      sender_name: inputs[1]?.value||'',
+      notify_on_any: checks[0]?.checked||false
+    });
+  });
+  return rules;
+}
+function renderRules(){
+  const s=loadNotifySettings();
+  document.getElementById('notifyEnabled').checked=s.enabled;
+  document.getElementById('soundEnabled').checked=s.sound_enabled;
+  const c=document.getElementById('rulesContainer');
+  c.innerHTML='';
+  (s.rules||[]).forEach((_,i)=>addRuleCard(s.rules[i]));
+}
+function addRuleCard(r){
+  r=r||{group_name:'',sender_name:'',notify_on_any:true};
+  const c=document.getElementById('rulesContainer');
+  const d=document.createElement('div');
+  d.className='rule-card';
+  d.innerHTML=`<div class="rule-header"><span style="font-size:12px;color:#888">规则 #${c.children.length+1}</span><button class="rule-del" onclick="this.closest('.rule-card').remove();saveNotifySettings()">&times;</button></div><input type="text" placeholder="群名（模糊匹配）" value="${esc(r.group_name)}" onchange="saveNotifySettings()"><input type="text" placeholder="发送人（可选，模糊匹配）" value="${esc(r.sender_name)}" onchange="saveNotifySettings()"><div class="rule-opts"><label><input type="checkbox" ${r.notify_on_any?'checked':''} onchange="saveNotifySettings()"> 匹配时通知</label></div>`;
+  c.appendChild(d);
+}
+function addRule(){addRuleCard();saveNotifySettings();}
+function toggleSettings(){
+  const p=document.getElementById('settingsPanel'),o=document.getElementById('settingsOverlay');
+  const show=!p.classList.contains('show');
+  p.classList.toggle('show',show);
+  o.classList.toggle('show',show);
+  if(show) renderRules();
+}
+function beep(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const osc=ctx.createOscillator();
+    const gain=ctx.createGain();
+    osc.connect(gain);gain.connect(ctx.destination);
+    osc.frequency.value=880;gain.gain.value=0.3;
+    osc.start();osc.stop(ctx.currentTime+0.15);
+  }catch(e){}
+}
+function checkNotifyMatch(m){
+  const s=loadNotifySettings();
+  if(!s.enabled||!s.rules||!s.rules.length) return false;
+  const chat=(m.chat||'').toLowerCase();
+  const sender=(m.sender||'').toLowerCase();
+  for(const r of s.rules){
+    if(!r.group_name) continue;
+    if(!chat.includes(r.group_name.toLowerCase())) continue;
+    if(r.sender_name && !sender.includes(r.sender_name.toLowerCase())) continue;
+    if(r.notify_on_any) return true;
+  }
+  return false;
+}
+function sendNotification(m){
+  const title=m.chat+(m.sender?' - '+m.sender:'');
+  const body=(m.content||'').slice(0,100);
+  if(Notification.permission==='granted'){
+    new Notification(title,{body,icon:'📡'});
+  }else if(Notification.permission!=='denied'){
+    Notification.requestPermission().then(p=>{if(p==='granted') new Notification(title,{body,icon:'📡'});});
+  }
+  const s=loadNotifySettings();
+  if(s.sound_enabled) beep();
+}
+
 function addMsg(m, animate){
   // 去重（包含类型，避免同时间戳的文字+图片组合被误判重复）
   const key = m.timestamp + '|' + (m.username||m.chat) + '|' + (m.type||'');
@@ -1567,6 +1705,13 @@ function addMsg(m, animate){
   const dk=m.timestamp+'|'+(m.username||m.chat);
   d.innerHTML=`<div class="msg-header"><span class="msg-time">${m.time}</span><span class="${cc}">${esc(m.chat)}</span>${sn}<div class="msg-r"><span class="msg-type">${m.type_icon} ${m.type}</span>${ur}</div></div><div class="msg-content" data-key="${dk}">${contentHtml}</div>`;
 
+  // 通知匹配检查
+  if(animate && checkNotifyMatch(m)){
+    d.classList.add('notify-hl');
+    sendNotification(m);
+    setTimeout(()=>d.classList.remove('notify-hl'), 10000);
+  }
+
   M.insertBefore(d, M.firstChild);
 
   if(animate){
@@ -1576,6 +1721,11 @@ function addMsg(m, animate){
 
   // 限制最多200条
   while(M.children.length>200) M.removeChild(M.lastChild);
+}
+
+// 页面加载时请求通知权限
+if('Notification' in window && Notification.permission==='default'){
+  Notification.requestPermission();
 }
 
 function connectSSE(){
