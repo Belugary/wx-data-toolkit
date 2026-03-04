@@ -1866,6 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
 
 class ThreadedServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 
 def main():
@@ -1907,19 +1908,22 @@ def main():
 
     # 后台预热所有 message DB（图片/emoji 解密必需）
     def _warmup():
-        t0 = time.perf_counter()
-        warmup_keys = ["message\\message_resource.db"]
-        for i in range(5):
-            k = f"message\\message_{i}.db"
-            if k in keys:
-                warmup_keys.append(k)
-        for k in warmup_keys:
-            t1 = time.perf_counter()
-            try:
-                db_cache.get(k)
-                print(f"[warmup] {k} {(time.perf_counter()-t1)*1000:.0f}ms", flush=True)
-            except Exception as e:
-                print(f"[warmup] {k} 失败: {e}", flush=True)
+        try:
+            t0 = time.perf_counter()
+            warmup_keys = ["message\\message_resource.db"]
+            for i in range(5):
+                k = f"message\\message_{i}.db"
+                if k in keys:
+                    warmup_keys.append(k)
+            for k in warmup_keys:
+                t1 = time.perf_counter()
+                try:
+                    db_cache.get(k)
+                    print(f"[warmup] {k} {(time.perf_counter()-t1)*1000:.0f}ms", flush=True)
+                except Exception as e:
+                    print(f"[warmup] {k} 失败: {e}", flush=True)
+        except Exception as e:
+            print(f"[warmup] 异常: {e}", flush=True)
         # 构建 emoji 映射（独立解密，不走 cache）
         _build_emoji_lookup(keys)
         print(f"[warmup] 全部完成 {(time.perf_counter()-t0)*1000:.0f}ms", flush=True)
@@ -1934,7 +1938,7 @@ def main():
 
     try:
         os.system(f'cmd.exe /c start http://localhost:{PORT}')
-    except:
+    except Exception:
         pass
 
     try:
