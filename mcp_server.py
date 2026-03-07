@@ -5,13 +5,14 @@ Based on FastMCP (stdio transport), reuses existing decryption.
 Runs on Windows Python (needs access to D:\ WeChat databases).
 """
 
-import os, sys, json, time, sqlite3, tempfile, struct, hashlib, atexit
+import os, sys, json, time, sqlite3, tempfile, struct, hashlib, atexit, re
 import hmac as hmac_mod
 from datetime import datetime
 from Crypto.Cipher import AES
 from mcp.server.fastmcp import FastMCP
 import zstandard as zstd
 from decode_image import ImageResolver
+from key_utils import get_key_info, key_path_variants, strip_key_metadata
 
 # ============ 加密常量 ============
 PAGE_SZ = 4096
@@ -50,7 +51,7 @@ elif not os.path.isabs(DECODED_IMAGE_DIR):
     DECODED_IMAGE_DIR = os.path.join(SCRIPT_DIR, DECODED_IMAGE_DIR)
 
 with open(KEYS_FILE) as f:
-    ALL_KEYS = json.load(f)
+    ALL_KEYS = strip_key_metadata(json.load(f))
 
 # ============ 解密函数 ============
 
@@ -149,7 +150,7 @@ class DBCache:
             tmp_path = info["path"]
             if not os.path.exists(tmp_path):
                 continue
-            rel_path = rel_key.replace('/', os.sep)
+            rel_path = rel_key.replace('\\', os.sep)
             db_path = os.path.join(DB_DIR, rel_path)
             wal_path = db_path + "-wal"
             try:
@@ -175,9 +176,10 @@ class DBCache:
             pass
 
     def get(self, rel_key):
-        if rel_key not in ALL_KEYS:
+        key_info = get_key_info(ALL_KEYS, rel_key)
+        if not key_info:
             return None
-        rel_path = rel_key.replace('/', os.sep)
+        rel_path = rel_key.replace('\\', '/').replace('/', os.sep)
         db_path = os.path.join(DB_DIR, rel_path)
         wal_path = db_path + "-wal"
         if not os.path.exists(db_path):
@@ -195,7 +197,7 @@ class DBCache:
                 return c_path
 
         tmp_path = self._cache_path(rel_key)
-        enc_key = bytes.fromhex(ALL_KEYS[rel_key]["enc_key"])
+        enc_key = bytes.fromhex(key_info["enc_key"])
         full_decrypt(db_path, tmp_path, enc_key)
         if os.path.exists(wal_path):
             decrypt_wal(wal_path, tmp_path, enc_key)
@@ -248,7 +250,7 @@ def get_contact_names():
             pass
 
     # 实时解密
-    path = _cache.get("contact/contact.db")
+    path = _cache.get(os.path.join("contact", "contact.db"))
     if path:
         try:
             _contact_names, _contact_full = _load_contacts_from(path)
@@ -329,11 +331,12 @@ def _parse_message_content(content, local_type, is_group):
     return sender, text
 
 
-# 消息 DB 的 rel_keys（排除 fts/resource/media/biz）
+# 消息 DB 的 rel_keys
+# 用 message_\d+\.db$ 匹配，自然排除 message_resource.db / message_fts_*.db
 MSG_DB_KEYS = sorted([
     k for k in ALL_KEYS
-    if k.startswith("message/message_") and k.endswith(".db")
-    and "fts" not in k and "resource" not in k
+    if any(v.startswith("message/") for v in key_path_variants(k))
+    and any(re.search(r"message_\d+\.db$", v) for v in key_path_variants(k))
 ])
 
 
@@ -379,7 +382,7 @@ def get_recent_sessions(limit: int = 20) -> str:
     Args:
         limit: 返回的会话数量，默认20
     """
-    path = _cache.get("session/session.db")
+    path = _cache.get(os.path.join("session", "session.db"))
     if not path:
         return "错误: 无法解密 session.db"
 
@@ -635,7 +638,7 @@ def get_new_messages() -> str:
     """获取自上次调用以来的新消息。首次调用返回最近的会话状态。"""
     global _last_check_state
 
-    path = _cache.get("session/session.db")
+    path = _cache.get(os.path.join("session", "session.db"))
     if not path:
         return "错误: 无法解密 session.db"
 
