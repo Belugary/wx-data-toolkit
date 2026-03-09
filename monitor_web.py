@@ -540,6 +540,8 @@ class SessionMonitor:
         self.prev_state = {}
         self.decrypt_ms = 0
         self.patched_pages = 0
+        # 已显示消息去重: {(username, timestamp, base_msg_type), ...}
+        self._shown_keys = set()
 
     def resolve_image(self, username, timestamp):
         """解密图片: username+timestamp → 解密后的图片文件名，失败返回 None"""
@@ -860,11 +862,8 @@ class SessionMonitor:
         hidden_msgs = []
         for ts, lt, mc, ct in all_rows:
             base = lt % 4294967296 if lt > 4294967296 else lt
-            # 跳过与 session 当前消息相同时间戳+类型的（已显示）
-            if ts == curr_ts and base == curr_msg_type:
-                continue
-            # 跳过 prev_ts 的消息（上一轮已显示）
-            if ts == prev_ts:
+            # 跳过已显示的消息（精确匹配 username+timestamp+type）
+            if (username, ts, base) in self._shown_keys:
                 continue
             # 解压 zstd
             if isinstance(mc, bytes) and ct == 4:
@@ -883,6 +882,7 @@ class SessionMonitor:
 
         global messages_log
         for ts, base, mc in hidden_msgs:
+            self._shown_keys.add((username, ts, base))
             msg_data = {
                 'time': datetime.fromtimestamp(ts).strftime('%H:%M:%S'),
                 'timestamp': ts,
@@ -1303,6 +1303,7 @@ class SessionMonitor:
                 }
 
                 new_msgs.append(msg_data)
+                self._shown_keys.add((username, curr['timestamp'], curr['msg_type']))
 
                 # 图片消息: 后台异步解密（不阻塞轮询）
                 if curr['msg_type'] == 3:
@@ -1352,6 +1353,10 @@ class SessionMonitor:
                 pass  # Windows CMD编码问题，不影响SSE推送
 
         self.prev_state = curr_state
+
+        # 清理过期的去重 key（保留最近 5 分钟）
+        cutoff = int(time.time()) - 300
+        self._shown_keys = {k for k in self._shown_keys if k[1] > cutoff}
 
 def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_db_map=None):
     mon = SessionMonitor(enc_key, session_db, contact_names, db_cache, username_db_map)
