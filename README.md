@@ -132,12 +132,18 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 | Tool | 功能 |
 |------|------|
 | `get_recent_sessions(limit)` | 最近会话列表（含消息摘要、未读数） |
-| `get_chat_history(chat_name, limit)` | 指定聊天的消息记录（支持模糊匹配名字） |
-| `search_messages(keyword, limit)` | 全库搜索消息内容 |
+| `get_chat_history(chat_name, limit, offset, start_time, end_time)` | 指定聊天的消息记录，支持时间范围和分页 |
+| `search_messages(keyword, chat_name, start_time, end_time, limit, offset)` | 统一搜索消息；支持全库、单个聊天对象、多个聊天对象、时间范围和分页 |
 | `get_contacts(query, limit)` | 搜索/列出联系人 |
 | `get_new_messages()` | 获取自上次调用以来的新消息 |
 
 前置条件：需要先运行 `python main.py` 或 `python find_all_keys.py` 完成密钥提取。
+
+新增能力：
+- `get_chat_history` 支持 `offset` 分页，以及 `start_time` / `end_time` 时间范围过滤
+- `search_messages` 支持“全库 / 单个联系人或群聊 / 多个联系人或群聊”的统一搜索入口
+- `search_messages` 在定向搜索时会汇报无法解析或无消息表的对象
+- 时间格式支持 `YYYY-MM-DD`、`YYYY-MM-DD HH:MM`、`YYYY-MM-DD HH:MM:SS`
 
 **[查看使用案例 →](USAGE.md)**
 

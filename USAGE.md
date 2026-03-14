@@ -78,7 +78,77 @@ Claude 调用 `search_messages(keyword="claude")`：
 ...
 ```
 
-## 4. 搜索联系人
+## 4. 时间范围 + 分页查看聊天记录
+
+```
+> 帮我看一下██群 3 月 1 日到 3 月 7 日的聊天，先给我前 20 条
+```
+
+Claude 可以调用：
+
+```python
+get_chat_history(
+    chat_name="██群",
+    start_time="2026-03-01",
+    end_time="2026-03-07",
+    limit=20,
+    offset=0,
+)
+```
+
+下一页：
+
+```python
+get_chat_history(
+    chat_name="██群",
+    start_time="2026-03-01",
+    end_time="2026-03-07",
+    limit=20,
+    offset=20,
+)
+```
+
+## 5. 搜索指定联系人/群聊在某个时间段内的消息
+
+```
+> 帮我搜一下██群这周谁提到过 Claude
+```
+
+Claude 可以调用统一接口：
+
+```python
+search_messages(
+    keyword="Claude",
+    chat_name="██群",
+    start_time="2026-03-01",
+    end_time="2026-03-07",
+    limit=20,
+    offset=0,
+)
+```
+
+## 6. 多个联系人/群聊联合搜索
+
+```
+> 帮我看看联系人A、联系人B 和 ██项目群 这周谁提到过“项目”
+```
+
+Claude 可以调用统一接口：
+
+```python
+search_messages(
+    keyword="项目",
+    chat_name=["联系人A", "联系人B", "██项目群"],
+    start_time="2026-03-01",
+    end_time="2026-03-07",
+    limit=20,
+    offset=0,
+)
+```
+
+如果某些名字没匹配到联系人，或没有对应消息表，结果里会单独说明。
+
+## 7. 搜索联系人
 
 ```
 > 帮我找一下姓张的联系人
@@ -95,7 +165,7 @@ wxid_████  备注: 张██  昵称: 小██
 ...
 ```
 
-## 5. 获取新消息
+## 8. 获取新消息
 
 ```
 > 有没有新消息
@@ -113,7 +183,7 @@ Claude 调用 `get_new_messages()`：
 [16:22] ██群 [群] (19条未读): (图片)
 ```
 
-## 6. 高级用法：群聊分析
+## 9. 高级用法：群聊分析
 
 Claude 可以获取大量消息后自动分析活跃度、话题分布、关键人物：
 

@@ -596,6 +596,206 @@ def _find_msg_table_for_user(username):
     return None, None
 
 
+def _validate_pagination(limit, offset=0):
+    if limit <= 0:
+        raise ValueError("limit 必须大于 0")
+    if offset < 0:
+        raise ValueError("offset 不能小于 0")
+
+
+def _parse_time_value(value, field_name, is_end=False):
+    value = (value or '').strip()
+    if not value:
+        return None
+
+    formats = [
+        ('%Y-%m-%d %H:%M:%S', False),
+        ('%Y-%m-%d %H:%M', False),
+        ('%Y-%m-%d', True),
+    ]
+    for fmt, date_only in formats:
+        try:
+            dt = datetime.strptime(value, fmt)
+            if date_only and is_end:
+                dt = dt.replace(hour=23, minute=59, second=59)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"{field_name} 格式无效: {value}。支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS"
+    )
+
+
+def _parse_time_range(start_time='', end_time=''):
+    start_ts = _parse_time_value(start_time, 'start_time', is_end=False)
+    end_ts = _parse_time_value(end_time, 'end_time', is_end=True)
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        raise ValueError('start_time 不能晚于 end_time')
+    return start_ts, end_ts
+
+
+def _build_message_filters(start_ts=None, end_ts=None, keyword=''):
+    clauses = []
+    params = []
+    if start_ts is not None:
+        clauses.append('create_time >= ?')
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append('create_time <= ?')
+        params.append(end_ts)
+    if keyword:
+        clauses.append('message_content LIKE ?')
+        params.append(f'%{keyword}%')
+    return clauses, params
+
+
+def _query_messages(conn, table_name, start_ts=None, end_ts=None, keyword='', limit=20, offset=0):
+    if not _is_safe_msg_table_name(table_name):
+        raise ValueError(f'非法消息表名: {table_name}')
+
+    clauses, params = _build_message_filters(start_ts, end_ts, keyword)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+    sql = f"""
+        SELECT local_id, local_type, create_time, real_sender_id, message_content,
+               WCDB_CT_message_content
+        FROM [{table_name}]
+        {where_sql}
+        ORDER BY create_time DESC
+        LIMIT ? OFFSET ?
+    """
+    return conn.execute(sql, (*params, limit, offset)).fetchall()
+
+
+def _resolve_chat_context(chat_name):
+    username = resolve_username(chat_name)
+    if not username:
+        return None
+
+    names = get_contact_names()
+    display_name = names.get(username, username)
+    db_path, table_name = _find_msg_table_for_user(username)
+    if not db_path:
+        return {
+            'query': chat_name,
+            'username': username,
+            'display_name': display_name,
+            'db_path': None,
+            'table_name': None,
+            'is_group': '@chatroom' in username,
+        }
+
+    return {
+        'query': chat_name,
+        'username': username,
+        'display_name': display_name,
+        'db_path': db_path,
+        'table_name': table_name,
+        'is_group': '@chatroom' in username,
+    }
+
+
+def _resolve_chat_contexts(chat_names):
+    if not chat_names:
+        raise ValueError('chat_names 不能为空')
+
+    resolved = []
+    unresolved = []
+    missing_tables = []
+    seen = set()
+
+    for chat_name in chat_names:
+        name = (chat_name or '').strip()
+        if not name:
+            unresolved.append('(空)')
+            continue
+        ctx = _resolve_chat_context(name)
+        if not ctx:
+            unresolved.append(name)
+            continue
+        if not ctx['db_path']:
+            missing_tables.append(ctx['display_name'])
+            continue
+        if ctx['username'] in seen:
+            continue
+        seen.add(ctx['username'])
+        resolved.append(ctx)
+
+    return resolved, unresolved, missing_tables
+
+
+def _normalize_chat_names(chat_name):
+    if chat_name is None:
+        return []
+    if isinstance(chat_name, str):
+        value = chat_name.strip()
+        return [value] if value else []
+    if isinstance(chat_name, (list, tuple, set)):
+        normalized = []
+        for item in chat_name:
+            if item is None:
+                continue
+            value = str(item).strip()
+            if value:
+                normalized.append(value)
+        return normalized
+    value = str(chat_name).strip()
+    return [value] if value else []
+
+
+def _format_history_lines(rows, username, display_name, is_group, names, id_to_username):
+    lines = []
+    for local_id, local_type, create_time, real_sender_id, content, ct in reversed(rows):
+        time_str = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M')
+        content = _decompress_content(content, ct)
+        if content is None:
+            content = '(无法解压)'
+
+        sender, text = _format_message_text(
+            local_id, local_type, content, is_group, username, display_name, names
+        )
+        if text and len(text) > 500:
+            text = text[:500] + '...'
+
+        sender_label = _resolve_sender_label(
+            real_sender_id, sender, is_group, username, display_name, names, id_to_username
+        )
+        if sender_label:
+            lines.append(f'[{time_str}] {sender_label}: {text}')
+        else:
+            lines.append(f'[{time_str}] {text}')
+    return lines
+
+
+def _build_search_entry(row, ctx, names, id_to_username):
+    local_id, local_type, create_time, real_sender_id, content, ct = row
+    content = _decompress_content(content, ct)
+    if content is None:
+        return None
+
+    sender, text = _format_message_text(
+        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names
+    )
+    if text and len(text) > 300:
+        text = text[:300] + '...'
+
+    sender_label = _resolve_sender_label(
+        real_sender_id,
+        sender,
+        ctx['is_group'],
+        ctx['username'],
+        ctx['display_name'],
+        names,
+        id_to_username,
+    )
+    time_str = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M')
+    entry = f"[{time_str}] [{ctx['display_name']}]"
+    if sender_label:
+        entry += f" {sender_label}:"
+    entry += f" {text}"
+    return create_time, entry
+
+
 # ============ MCP Server ============
 
 mcp = FastMCP("wechat", instructions="查询微信消息、联系人等数据")
@@ -664,89 +864,215 @@ def get_recent_sessions(limit: int = 20) -> str:
 
 
 @mcp.tool()
-def get_chat_history(chat_name: str, limit: int = 50) -> str:
+def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_time: str = "", end_time: str = "") -> str:
     """获取指定聊天的消息记录。
 
     Args:
         chat_name: 聊天对象的名字、备注名或wxid，自动模糊匹配
         limit: 返回的消息数量，默认50
+        offset: 分页偏移量，默认0
+        start_time: 起始时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
+        end_time: 结束时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
     """
-    username = resolve_username(chat_name)
-    if not username:
+    try:
+        _validate_pagination(limit, offset)
+        start_ts, end_ts = _parse_time_range(start_time, end_time)
+    except ValueError as e:
+        return f"错误: {e}"
+
+    ctx = _resolve_chat_context(chat_name)
+    if not ctx:
         return f"找不到聊天对象: {chat_name}\n提示: 可以用 get_contacts(query='{chat_name}') 搜索联系人"
+    if not ctx['db_path']:
+        return f"找不到 {ctx['display_name']} 的消息记录（可能在未解密的DB中或无消息）"
 
     names = get_contact_names()
-    display_name = names.get(username, username)
-    is_group = '@chatroom' in username
-
-    db_path, table_name = _find_msg_table_for_user(username)
-    if not db_path:
-        return f"找不到 {display_name} 的消息记录（可能在未解密的DB中或无消息）"
-
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(ctx['db_path'])
     try:
         id_to_username = _load_name2id_maps(conn)
-        rows = conn.execute(f"""
-            SELECT local_id, local_type, create_time, real_sender_id, message_content,
-                   WCDB_CT_message_content
-            FROM [{table_name}]
-            ORDER BY create_time DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
+        rows = _query_messages(
+            conn,
+            ctx['table_name'],
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=limit,
+            offset=offset,
+        )
     except Exception as e:
         conn.close()
         return f"查询失败: {e}"
     conn.close()
 
     if not rows:
-        return f"{display_name} 无消息记录"
+        return f"{ctx['display_name']} 无消息记录"
 
-    lines = []
-    for local_id, local_type, create_time, real_sender_id, content, ct in reversed(rows):
-        time_str = datetime.fromtimestamp(create_time).strftime('%m-%d %H:%M')
+    lines = _format_history_lines(
+        rows,
+        ctx['username'],
+        ctx['display_name'],
+        ctx['is_group'],
+        names,
+        id_to_username,
+    )
 
-        # zstd 解压
-        content = _decompress_content(content, ct)
-        if content is None:
-            content = '(无法解压)'
-
-        sender, text = _format_message_text(
-            local_id, local_type, content, is_group, username, display_name, names
-        )
-
-        if text and len(text) > 500:
-            text = text[:500] + "..."
-
-        sender_label = _resolve_sender_label(
-            real_sender_id, sender, is_group, username, display_name, names, id_to_username
-        )
-        if sender_label:
-            lines.append(f"[{time_str}] {sender_label}: {text}")
-        else:
-            lines.append(f"[{time_str}] {text}")
-
-    header = f"{display_name} 的最近 {len(lines)} 条消息"
-    if is_group:
+    header = f"{ctx['display_name']} 的消息记录（返回 {len(lines)} 条，offset={offset}, limit={limit}）"
+    if ctx['is_group']:
         header += " [群聊]"
+    if start_time or end_time:
+        header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
     return header + ":\n\n" + "\n".join(lines)
 
 
 @mcp.tool()
-def search_messages(keyword: str, limit: int = 20) -> str:
-    """在所有聊天记录中搜索包含关键词的消息。
+def search_messages(
+    keyword: str,
+    chat_name: str | list[str] | None = None,
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """搜索消息内容，支持全库、单个聊天对象、多个聊天对象，以及时间范围和分页。
 
     Args:
         keyword: 搜索关键词
+        chat_name: 聊天对象名称，可为空、单个字符串或字符串列表
+        start_time: 起始时间，可为空
+        end_time: 结束时间，可为空
         limit: 返回的结果数量，默认20
+        offset: 分页偏移量，默认0
     """
     if not keyword or len(keyword) < 1:
         return "请提供搜索关键词"
 
+    chat_names = _normalize_chat_names(chat_name)
+
+    try:
+        _validate_pagination(limit, offset)
+        start_ts, end_ts = _parse_time_range(start_time, end_time)
+    except ValueError as e:
+        return f"错误: {e}"
+
+    if len(chat_names) == 1:
+        ctx = _resolve_chat_context(chat_names[0])
+        if not ctx:
+            return f"找不到聊天对象: {chat_names[0]}\n提示: 可以用 get_contacts(query='{chat_names[0]}') 搜索联系人"
+        if not ctx['db_path']:
+            return f"找不到 {ctx['display_name']} 的消息记录（可能在未解密的DB中或无消息）"
+
+        names = get_contact_names()
+        conn = sqlite3.connect(ctx['db_path'])
+        try:
+            id_to_username = _load_name2id_maps(conn)
+            rows = _query_messages(
+                conn,
+                ctx['table_name'],
+                start_ts=start_ts,
+                end_ts=end_ts,
+                keyword=keyword,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as e:
+            conn.close()
+            return f"查询失败: {e}"
+        conn.close()
+
+        if not rows:
+            return f"未在 {ctx['display_name']} 中找到包含 \"{keyword}\" 的消息"
+
+        entries = []
+        for row in rows:
+            formatted = _build_search_entry(row, ctx, names, id_to_username)
+            if formatted:
+                entries.append(formatted)
+
+        if not entries:
+            return f"未在 {ctx['display_name']} 中找到包含 \"{keyword}\" 的可读消息"
+
+        entries.sort(key=lambda x: x[0])
+        header = f"在 {ctx['display_name']} 中搜索 \"{keyword}\" 找到 {len(entries)} 条结果（offset={offset}, limit={limit}）"
+        if start_time or end_time:
+            header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+        return header + ":\n\n" + "\n\n".join(item[1] for item in entries)
+
+    if len(chat_names) > 1:
+        try:
+            resolved_contexts, unresolved, missing_tables = _resolve_chat_contexts(chat_names)
+        except ValueError as e:
+            return f"错误: {e}"
+
+        if not resolved_contexts:
+            details = []
+            if unresolved:
+                details.append("未找到联系人: " + "、".join(unresolved))
+            if missing_tables:
+                details.append("无消息表: " + "、".join(missing_tables))
+            suffix = f"\n{chr(10).join(details)}" if details else ""
+            return f"错误: 没有可查询的聊天对象{suffix}"
+
+        names = get_contact_names()
+        collected = []
+        failures = []
+        per_chat_limit = limit + offset
+
+        for ctx in resolved_contexts:
+            conn = sqlite3.connect(ctx['db_path'])
+            try:
+                id_to_username = _load_name2id_maps(conn)
+                rows = _query_messages(
+                    conn,
+                    ctx['table_name'],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    keyword=keyword,
+                    limit=per_chat_limit,
+                    offset=0,
+                )
+                for row in rows:
+                    formatted = _build_search_entry(row, ctx, names, id_to_username)
+                    if formatted:
+                        collected.append(formatted)
+            except Exception as e:
+                failures.append(f"{ctx['display_name']}: {e}")
+            finally:
+                conn.close()
+
+        collected.sort(key=lambda x: x[0], reverse=True)
+        paged = collected[offset:offset + limit]
+
+        notes = []
+        if unresolved:
+            notes.append("未找到联系人: " + "、".join(unresolved))
+        if missing_tables:
+            notes.append("无消息表: " + "、".join(missing_tables))
+        if failures:
+            notes.append("查询失败: " + "；".join(failures))
+
+        if not paged:
+            header = f"在 {len(resolved_contexts)} 个聊天对象中未找到包含 \"{keyword}\" 的消息"
+            if start_time or end_time:
+                header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+            if notes:
+                header += "\n" + "\n".join(notes)
+            return header
+
+        header = (
+            f"在 {len(resolved_contexts)} 个聊天对象中搜索 \"{keyword}\" 找到 {len(paged)} 条结果"
+            f"（offset={offset}, limit={limit}）"
+        )
+        if start_time or end_time:
+            header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+        if notes:
+            header += "\n" + "\n".join(notes)
+        return header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+
     names = get_contact_names()
     results = []
+    max_results = limit + offset
 
     for rel_key in MSG_DB_KEYS:
-        if len(results) >= limit:
+        if len(results) >= max_results:
             break
 
         path = _cache.get(rel_key)
@@ -770,21 +1096,23 @@ def search_messages(keyword: str, limit: int = 20) -> str:
                 pass
 
             for (tname,) in tables:
-                if len(results) >= limit:
+                if len(results) >= max_results:
                     break
                 username = name2id.get(tname, '')
                 is_group = '@chatroom' in username
                 display = names.get(username, username) if username else tname
 
                 try:
+                    clauses, params = _build_message_filters(start_ts, end_ts, keyword)
+                    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ''
                     rows = conn.execute(f"""
                         SELECT local_type, create_time, message_content,
                                WCDB_CT_message_content
                         FROM [{tname}]
-                        WHERE message_content LIKE ?
+                        {where_sql}
                         ORDER BY create_time DESC
-                        LIMIT ?
-                    """, (f'%{keyword}%', limit - len(results))).fetchall()
+                        LIMIT ? OFFSET ?
+                    """, (*params, max_results - len(results), 0)).fetchall()
                 except Exception:
                     continue
 
@@ -809,13 +1137,15 @@ def search_messages(keyword: str, limit: int = 20) -> str:
             conn.close()
 
     results.sort(key=lambda x: x[0], reverse=True)
-    entries = [r[1] for r in results[:limit]]
+    entries = [r[1] for r in results[offset:offset + limit]]
 
     if not entries:
         return f"未找到包含 \"{keyword}\" 的消息"
 
-    return f"搜索 \"{keyword}\" 找到 {len(entries)} 条结果:\n\n" + "\n\n".join(entries)
-
+    header = f"搜索 \"{keyword}\" 找到 {len(entries)} 条结果（offset={offset}, limit={limit}）"
+    if start_time or end_time:
+        header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+    return header + ":\n\n" + "\n\n".join(entries)
 
 @mcp.tool()
 def get_contacts(query: str = "", limit: int = 50) -> str:
