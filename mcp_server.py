@@ -224,6 +224,7 @@ _self_username = None
 _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
 _XML_PARSE_MAX_LEN = 20000
 _QUERY_LIMIT_MAX = 500
+_HISTORY_QUERY_BATCH_SIZE = 500
 
 
 def _load_contacts_from(db_path):
@@ -635,11 +636,11 @@ def _find_msg_tables_for_user(username):
     return matches
 
 
-def _validate_pagination(limit, offset=0):
+def _validate_pagination(limit, offset=0, limit_max=_QUERY_LIMIT_MAX):
     if limit <= 0:
         raise ValueError("limit 必须大于 0")
-    if limit > _QUERY_LIMIT_MAX:
-        raise ValueError(f"limit 不能大于 {_QUERY_LIMIT_MAX}")
+    if limit_max is not None and limit > limit_max:
+        raise ValueError(f"limit 不能大于 {limit_max}")
     if offset < 0:
         raise ValueError("offset 不能小于 0")
 
@@ -841,8 +842,6 @@ def _build_history_line(row, ctx, names, id_to_username):
     sender, text = _format_message_text(
         local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names
     )
-    if text and len(text) > 500:
-        text = text[:500] + '...'
 
     sender_label = _resolve_sender_label(
         real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username
@@ -880,6 +879,10 @@ def _message_query_batch_size(candidate_limit):
     return candidate_limit
 
 
+def _history_query_batch_size(candidate_limit):
+    return min(candidate_limit, _HISTORY_QUERY_BATCH_SIZE)
+
+
 def _page_ranked_entries(entries, limit, offset):
     ordered = sorted(entries, key=lambda item: item[0], reverse=True)
     paged = ordered[offset:offset + limit]
@@ -891,22 +894,40 @@ def _collect_chat_history_lines(ctx, names, start_ts=None, end_ts=None, limit=20
     collected = []
     failures = []
     candidate_limit = _candidate_page_size(limit, offset)
+    batch_size = _history_query_batch_size(candidate_limit)
 
     for table_ctx in _iter_table_contexts(ctx):
         try:
             with closing(sqlite3.connect(table_ctx['db_path'])) as conn:
                 id_to_username = _load_name2id_maps(conn)
+                fetch_offset = 0
+                collected_before_table = len(collected)
                 # 当前页上的消息一定落在各分表最近的 offset+limit 条记录内。
-                rows = _query_messages(
-                    conn,
-                    table_ctx['table_name'],
-                    start_ts=start_ts,
-                    end_ts=end_ts,
-                    limit=candidate_limit,
-                    offset=0,
-                )
-                for row in rows:
-                    collected.append(_build_history_line(row, table_ctx, names, id_to_username))
+                while len(collected) - collected_before_table < candidate_limit:
+                    rows = _query_messages(
+                        conn,
+                        table_ctx['table_name'],
+                        start_ts=start_ts,
+                        end_ts=end_ts,
+                        limit=batch_size,
+                        offset=fetch_offset,
+                    )
+                    if not rows:
+                        break
+                    fetch_offset += len(rows)
+
+                    for row in rows:
+                        try:
+                            collected.append(_build_history_line(row, table_ctx, names, id_to_username))
+                        except Exception as e:
+                            failures.append(
+                                f"{table_ctx['display_name']} local_id={row[0]} create_time={row[2]}: {e}"
+                            )
+                        if len(collected) - collected_before_table >= candidate_limit:
+                            break
+
+                    if len(rows) < batch_size:
+                        break
         except Exception as e:
             failures.append(f"{table_ctx['db_path']}: {e}")
 
@@ -1221,13 +1242,13 @@ def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_tim
 
     Args:
         chat_name: 聊天对象的名字、备注名或wxid，自动模糊匹配
-        limit: 返回的消息数量，默认50，最大500
+        limit: 返回的消息数量，默认50；支持较大的值，建议配合 offset 分页使用
         offset: 分页偏移量，默认0
         start_time: 起始时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
         end_time: 结束时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
     """
     try:
-        _validate_pagination(limit, offset)
+        _validate_pagination(limit, offset, limit_max=None)
         start_ts, end_ts = _parse_time_range(start_time, end_time)
     except ValueError as e:
         return f"错误: {e}"

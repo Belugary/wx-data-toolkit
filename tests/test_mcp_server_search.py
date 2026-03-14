@@ -72,6 +72,10 @@ class SearchMessagesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "limit 不能大于 500"):
             mcp_server._validate_pagination(501, 0)
 
+    def test_validate_pagination_allows_large_limit_when_limit_is_unbounded(self):
+        # get_chat_history 允许更大的 limit，只校验正数和 offset。
+        mcp_server._validate_pagination(999999, 0, limit_max=None)
+
     def test_page_search_entries_returns_chronological_results_with_offset(self):
         # 结果应先按最新时间分页，再把当前页恢复成时间正序输出。
         entries = [(1, "a"), (5, "e"), (3, "c"), (4, "d"), (2, "b")]
@@ -377,6 +381,43 @@ class SearchMessagesTests(unittest.TestCase):
         self.assertIn("new message", result)
         self.assertNotIn("old message", result)
 
+    def test_get_chat_history_large_limit_reads_all_rows_across_shards(self):
+        # 大 limit 下，跨分片历史查询不能只返回较旧分片里的少量消息。
+        older_messages = [
+            (index, 1000 + index, f"old shard message {index}")
+            for index in range(1, 18)
+        ]
+        newer_messages = [
+            (index, 2000 + index, f"new shard message {index}")
+            for index in range(1, 296)
+        ]
+        older_db = self.create_db("history_cross_shard_older.db", {"alice": older_messages})
+        newer_db = self.create_db("history_cross_shard_newer.db", {"alice": newer_messages})
+        ctx = {
+            "query": "Alice",
+            "username": "alice",
+            "display_name": "Alice",
+            "db_path": newer_db,
+            "table_name": _msg_table_name("alice"),
+            "message_tables": [
+                {"db_path": newer_db, "table_name": _msg_table_name("alice")},
+                {"db_path": older_db, "table_name": _msg_table_name("alice")},
+            ],
+            "is_group": False,
+        }
+
+        with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
+            mcp_server, "_resolve_chat_context", return_value=ctx
+        ):
+            result = mcp_server.get_chat_history("Alice", limit=500, offset=0)
+
+        self.assertIn("Alice 的消息记录（返回 312 条，offset=0, limit=500）", result)
+        self.assertIn("new shard message 295", result)
+        self.assertIn("old shard message 17", result)
+
+        body = result.split(":\n\n", 1)[1]
+        self.assertEqual(len(body.splitlines()), 312)
+
     def test_get_chat_history_uses_bounded_sql_pagination(self):
         # 历史查询应把 offset+limit 下推到 SQL，避免把整张消息表读出来后再切片。
         db_path = self.create_db(
@@ -419,6 +460,36 @@ class SearchMessagesTests(unittest.TestCase):
         self.assertNotIn("oldest", result)
         self.assertEqual(calls, [(_msg_table_name("alice"), 3, 0)])
 
+    def test_get_chat_history_allows_large_limit_values(self):
+        # 历史查询不应再把大 limit 直接拒绝掉。
+        db_path = self.create_db(
+            "history_large_limit.db",
+            {
+                "alice": [
+                    (1, 200, "message 1"),
+                    (2, 100, "message 2"),
+                ]
+            },
+        )
+        ctx = {
+            "query": "Alice",
+            "username": "alice",
+            "display_name": "Alice",
+            "db_path": db_path,
+            "table_name": _msg_table_name("alice"),
+            "message_tables": [{"db_path": db_path, "table_name": _msg_table_name("alice")}],
+            "is_group": False,
+        }
+
+        with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
+            mcp_server, "_resolve_chat_context", return_value=ctx
+        ):
+            result = mcp_server.get_chat_history("Alice", limit=999999, offset=0)
+
+        self.assertNotIn("错误:", result)
+        self.assertIn("message 1", result)
+        self.assertIn("message 2", result)
+
     def test_get_chat_history_keeps_partial_results_when_formatting_fails(self):
         # 单条坏消息不应让整个历史查询失败，已有结果仍应返回并附带失败说明。
         db_path = self.create_db(
@@ -451,6 +522,31 @@ class SearchMessagesTests(unittest.TestCase):
         self.assertIn("good message", result)
         self.assertIn("查询失败:", result)
         self.assertIn("bad row", result)
+
+    def test_get_chat_history_does_not_truncate_long_messages(self):
+        # 历史记录应返回完整消息内容，而不是固定截断到 500 字符。
+        long_message = "x" * 600
+        db_path = self.create_db(
+            "history_long_message.db",
+            {"alice": [(1, 200, long_message)]},
+        )
+        ctx = {
+            "query": "Alice",
+            "username": "alice",
+            "display_name": "Alice",
+            "db_path": db_path,
+            "table_name": _msg_table_name("alice"),
+            "message_tables": [{"db_path": db_path, "table_name": _msg_table_name("alice")}],
+            "is_group": False,
+        }
+
+        with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
+            mcp_server, "_resolve_chat_context", return_value=ctx
+        ):
+            result = mcp_server.get_chat_history("Alice", limit=1, offset=0)
+
+        self.assertIn(long_message, result)
+        self.assertNotIn(("x" * 500) + "...", result)
 
     def test_search_messages_single_chat_merges_sharded_message_tables(self):
         # 单聊搜索也要跨分片合并，否则最近消息可能查不到。

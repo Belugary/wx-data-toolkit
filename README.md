@@ -139,7 +139,7 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 
 前置条件：需要先运行 `python main.py` 或 `python find_all_keys.py` 完成密钥提取。
 
-说明：`get_chat_history` 和 `search_messages` 的 `limit` 最大为 `500`。
+说明：`search_messages` 的 `limit` 最大为 `500`；`get_chat_history` 支持更大的 `limit`，但消息很多时仍建议配合 `offset` 分页读取。
 
 **[查看使用案例 →](USAGE.md)**
 
