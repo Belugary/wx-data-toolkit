@@ -49,6 +49,14 @@ Linux：
 pip install -r requirements.txt
 ```
 
+Windows 如果遇到权限不足或全局环境不可写，可以改用：
+
+```bash
+py -m pip install --user -r requirements.txt
+```
+
+如果需要读取受保护的进程或把依赖安装到系统 Python，也可能需要以管理员身份打开终端。
+
 ### 快速开始
 
 Windows：
@@ -104,7 +112,7 @@ Linux 版 `config.json` 示例：
 将微信数据查询能力接入 [Claude Code](https://claude.ai/claude-code)，让 AI 直接读取你的微信消息。
 
 ```bash
-pip install mcp
+pip install -r requirements.txt
 ```
 
 注册到 Claude Code：
