@@ -4,6 +4,8 @@
 
 ## 更新日志
 
+## 防失联tg: https://t.me/wechat_decrypt
+
 ### 2025-03-03 — 富媒体内容 & 组合消息修复
 
 - **表情包内联显示**: 自动从 emoticon.db 构建 MD5→CDN 映射，支持自定义表情（NonStore）和商店表情（Store），CDN 下载后本地缓存
