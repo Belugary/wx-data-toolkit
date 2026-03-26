@@ -454,17 +454,11 @@ if __name__ == "__main__":
         print(f"文件不存在: {dat_file}")
         sys.exit(1)
 
-    key = detect_xor_key(dat_file)
-    if key is None:
-        print("无法检测 XOR key，文件可能不是微信加密图片")
-        sys.exit(1)
-
-    print(f"检测到 XOR key: 0x{key:02X}")
-
-    result_path, fmt = xor_decrypt_file(dat_file, out_file, key)
+    result_path, fmt = decrypt_dat_file(dat_file, out_file)
     if result_path:
         size = os.path.getsize(result_path)
         print(f"解密成功: {result_path}")
         print(f"格式: {fmt}, 大小: {size:,} bytes")
     else:
         print("解密失败")
+        sys.exit(1)
