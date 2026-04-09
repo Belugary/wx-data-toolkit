@@ -1905,9 +1905,31 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode('utf-8'))
 
-        elif self.path == '/api/history':
+        elif self.path.startswith('/api/history'):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            filter_chat = params.get('chat', [''])[0].strip().lower()
+            since_ts = 0
+            try:
+                since_ts = int(params.get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                pass
+            limit_val = 500
+            try:
+                limit_val = min(int(params.get('limit', ['500'])[0]), 2000)
+            except (ValueError, TypeError):
+                pass
+
             with messages_lock:
                 data = sorted(messages_log, key=lambda m: m.get('timestamp', 0))
+
+            if since_ts:
+                data = [m for m in data if m.get('timestamp', 0) > since_ts]
+            if filter_chat:
+                data = [m for m in data if filter_chat in m.get('chat', '').lower()
+                        or filter_chat in m.get('username', '').lower()]
+            data = data[-limit_val:]
+
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.end_headers()

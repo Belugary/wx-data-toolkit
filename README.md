@@ -109,6 +109,20 @@ Linux 版 `config.json` 示例：
 - 总延迟约 100ms
 - **图片消息内联预览**（支持旧 XOR / V1 / V2 三种 .dat 加密格式）
 
+#### HTTP API
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/history` | 最近消息列表 (JSON) |
+| `GET /api/history?chat=群名` | 按群名/用户名过滤消息 |
+| `GET /api/history?since=1712000000` | 增量拉取（返回该时间戳之后的消息） |
+| `GET /api/history?chat=群名&since=ts&limit=100` | 参数可组合使用 |
+| `GET /api/tags` | 所有联系人标签及成员 (JSON) |
+| `GET /api/tags?name=同事` | 按标签名过滤 |
+| `GET /stream` | SSE 实时消息推送 |
+
+将特定群消息存到自己的数据库：监听 `/stream` 或轮询 `/api/history?chat=群名&since=上次时间戳`，写入即可。
+
 ### MCP Server (Claude AI 集成)
 
 将微信数据查询能力接入 [Claude Code](https://claude.ai/claude-code)，让 AI 直接读取你的微信消息。
@@ -145,6 +159,8 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 | `get_chat_history(chat_name, limit, offset, start_time, end_time)` | 指定聊天的消息记录，支持时间范围和分页 |
 | `search_messages(keyword, chat_name, start_time, end_time, limit, offset)` | 统一搜索消息；支持全库、单个聊天对象、多个聊天对象、时间范围和分页 |
 | `get_contacts(query, limit)` | 搜索/列出联系人 |
+| `get_contact_tags()` | 列出所有联系人标签及成员数量 |
+| `get_tag_members(tag_name)` | 获取指定标签下的所有联系人，支持模糊匹配 |
 | `get_new_messages()` | 获取自上次调用以来的新消息 |
 
 前置条件：需要先运行 `python main.py` 或 `python find_all_keys.py` 完成密钥提取。
