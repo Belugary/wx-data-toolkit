@@ -220,6 +220,31 @@ python find_image_key.py
 
 > **注意**: AES 密钥仅在微信查看图片时临时加载到内存中。如果扫描未找到密钥，请先在微信中查看几张图片，然后立即重新运行脚本。
 
+#### 批量解密所有图片
+
+如果不想跑 `monitor_web` 而是希望**一次性把所有 .dat 图片解密成明文文件树**(典型场景:把图片喂给下游分析/搜索/归档管线、或与 `decrypt` 产物配对作为静态产物快照),用 `decode-images` 子命令:
+
+```bash
+python main.py decode-images
+```
+
+输出目录布局**镜像微信的 attach 结构**(去掉 `Img/`、剥掉 `_t`/`_h` 缩略图后缀):
+
+```
+<decoded_image_dir>/<chat_hash>/<YYYY-MM>/<file_md5>.<ext>
+```
+
+其中 `chat_hash = md5(username).hexdigest()`(`username` 即 wxid 或 `<id>@chatroom`),`<ext>` 由 magic 自动检测(jpg / png / gif / webp / hevc 等)。wxgf 容器输出 `.hevc` 裸流,**不在 upstream 做 mp4 转换**(交给下游按需调 ffmpeg)。
+
+特性:
+- **幂等**:目标存在(任何扩展名)时跳过,可反复跑;`--force` 强制重解
+- **原子写**:解密先到 `.tmp`,`os.replace` 重命名,中断不留半文件
+- **错误隔离**:单文件失败不阻塞批次,失败明细打到 stderr
+- **V2 无 key 容错**:未配置 `image_aes_key` 时 V2 文件计入 `skipped_no_key`(可恢复:补 key 后重跑),V1 / 老 XOR 不受影响
+- **CLI override**:`--attach-dir` / `--decoded-dir` / `--aes-key` / `--xor-key` 都可覆盖 `config.json`,适合 CI / 多账号 / 容器化场景
+
+`python main.py decode-images --help` 查看完整选项。退出码:`0` = 全部成功;`2` = 部分文件失败(产物可用,失败列表见 stderr)。
+
 ## 文件说明
 
 | 文件 | 说明 |
