@@ -36,6 +36,8 @@ sudo ./bin/find_all_keys_macos
 
 **朋友圈解密**：`python -m wxdec.cli.decrypt_sns --start YYYY-MM-DD --decrypt-media` → `<decoded_image_dir>/sns/<md5>.<ext>`，纯 Python ISAAC-64 解密、幂等、原子写。CDN URL 通常仅存活数天，需要在窗口内本地化（落盘后即永久缓存，不再依赖远端）。
 
+**每日同步入口**：`python -m wxdec.cli.daily_sync` 串联 `decrypt --with-wal` + `decode-images` + 最近 7 天 `decrypt_sns --decrypt-media`，给外部 OS 调度器（launchd / systemd-user / schtasks）当 daily 触发目标。日志走 stdout/stderr，由调度方负责重定向落盘。
+
 **实时消息流**：`python main.py` → http://localhost:5678（SSE，~100ms 延迟，图片内联预览）。HTTP API: `/api/history`、`/api/tags`、`/stream`。
 
 **Claude MCP 集成**：`claude mcp add wechat -- python /path/to/wechat-decrypt/wxdec/mcp_server.py`。可用工具：`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。
