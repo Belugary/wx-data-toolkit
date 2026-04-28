@@ -15,7 +15,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch, MagicMock
 
-import decrypt_db
+from wxdec import decrypt_db
 
 
 class _MainHarness:

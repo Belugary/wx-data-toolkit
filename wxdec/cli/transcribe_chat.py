@@ -2,15 +2,15 @@
 为聊天导出 JSON 中的语音消息补齐转录文本。
 
 用法:
-    .venv/bin/python3 transcribe_chat.py <input.json> [output.json]
+    .venv/bin/python3 -m wxdec.cli.transcribe_chat <input.json> [output.json]
 
 参数:
     <input.json>   由 export_chat.py 产出的 JSON。
     [output.json]  可选输出路径，默认 "<input>_transcribed.json"。
 
 完整流程示例:
-    .venv/bin/python3 export_chat.py <chat_name> /tmp/chat.json
-    .venv/bin/python3 transcribe_chat.py /tmp/chat.json /tmp/chat_transcribed.json
+    .venv/bin/python3 -m wxdec.cli.export_chat <chat_name> /tmp/chat.json
+    .venv/bin/python3 -m wxdec.cli.transcribe_chat /tmp/chat.json /tmp/chat_transcribed.json
 
 行为说明:
     - 使用 OpenAI Whisper (CPU，单线程) 对每条语音消息转录。
@@ -26,7 +26,7 @@ import os
 import sys
 from datetime import datetime
 
-import mcp_server
+from wxdec import mcp_server
 
 
 def _transcribe_local_id(username, local_id):
@@ -93,7 +93,7 @@ def transcribe_export(input_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 transcribe_chat.py <input.json> [output.json]")
+        print("Usage: python3 -m wxdec.cli.transcribe_chat <input.json> [output.json]")
         sys.exit(1)
 
     inp = sys.argv[1]

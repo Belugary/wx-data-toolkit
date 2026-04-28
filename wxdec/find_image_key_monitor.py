@@ -212,7 +212,7 @@ def verify_and_decrypt(attach_dir, aes_key_str, xor_key):
             elif result[:4] == b'wxgf': fmt, ext = "WXGF", ".hevc"
 
             if fmt != "unknown":
-                out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decoded_images")
+                out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "decoded_images")
                 os.makedirs(out_dir, exist_ok=True)
                 out_path = os.path.join(out_dir, os.path.splitext(os.path.basename(f))[0] + ext)
                 with open(out_path, 'wb') as fp:
@@ -226,7 +226,7 @@ def verify_and_decrypt(attach_dir, aes_key_str, xor_key):
 
 
 def main():
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
     with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from Crypto.Cipher import AES
 
-import find_image_key_macos as fkm
+from wxdec import find_image_key_macos as fkm
 
 
 class NormalizeWxidTests(unittest.TestCase):

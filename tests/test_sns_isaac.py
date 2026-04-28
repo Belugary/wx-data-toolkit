@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sns_isaac import (
+from wxdec.sns_isaac import (
     Isaac64,
     SNS_VIDEO_HEAD_SIZE,
     decrypt_image_bytes,

@@ -5,7 +5,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import mcp_server
+from wxdec import mcp_server
 
 
 class _CacheIsolationMixin:

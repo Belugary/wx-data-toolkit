@@ -14,7 +14,7 @@ import re
 import sys
 import time
 
-from key_scan_common import (
+from wxdec.key_scan_common import (
     collect_db_files, scan_memory_for_keys, cross_verify_keys, save_results,
 )
 
@@ -144,7 +144,7 @@ def _check_permissions():
 
 
 def main():
-    from config import load_config
+    from wxdec.config import load_config
     _cfg = load_config()
     db_dir = _cfg["db_dir"]
     out_file = _cfg["keys_file"]

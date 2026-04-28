@@ -317,7 +317,7 @@ def main(config_path=None):
         sys.exit(1)
 
     if config_path is None:
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                    "config.json")
     try:
         with open(config_path, encoding="utf-8") as f:

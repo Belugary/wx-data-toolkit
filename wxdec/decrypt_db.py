@@ -22,8 +22,8 @@ SQLITE_HDR = b'SQLite format 3\x00'
 WAL_HEADER_SZ = 32
 WAL_FRAME_HEADER_SZ = 24
 
-from config import load_config
-from key_utils import get_key_info, strip_key_metadata
+from wxdec.config import load_config
+from wxdec.key_utils import get_key_info, strip_key_metadata
 _cfg = load_config()
 DB_DIR = _cfg["db_dir"]
 OUT_DIR = _cfg["decrypted_dir"]

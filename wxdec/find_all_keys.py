@@ -7,10 +7,10 @@ import sys
 def _load_impl():
     system = platform.system().lower()
     if system == "windows":
-        import find_all_keys_windows as impl
+        from wxdec import find_all_keys_windows as impl
         return impl
     if system == "linux":
-        import find_all_keys_linux as impl
+        from wxdec import find_all_keys_linux as impl
         return impl
     if system == "darwin":
         raise RuntimeError(

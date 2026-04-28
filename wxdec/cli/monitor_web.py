@@ -16,19 +16,19 @@ from Crypto.Cipher import AES
 import urllib.parse
 import glob as glob_mod
 import zstandard as zstd
-from decode_image import extract_md5_from_packed_info, decrypt_dat_file, is_v2_format
-from key_utils import get_key_info, strip_key_metadata
-from decrypt_db import full_decrypt, decrypt_wal_full
+from wxdec.decode_image import extract_md5_from_packed_info, decrypt_dat_file, is_v2_format
+from wxdec.key_utils import get_key_info, strip_key_metadata
+from wxdec.decrypt_db import full_decrypt, decrypt_wal_full
 
 _zstd_dctx = zstd.ZstdDecompressor()
 
-from config import load_config
+from wxdec.config import load_config
 _cfg = load_config()
 DB_DIR = _cfg["db_dir"]
 KEYS_FILE = _cfg["keys_file"]
 CONTACT_CACHE = os.path.join(_cfg["decrypted_dir"], "contact", "contact.db")
 DECRYPTED_SESSION = os.path.join(_cfg["decrypted_dir"], "session", "session.db")
-DECODED_IMAGE_DIR = _cfg.get("decoded_image_dir", os.path.join(os.path.dirname(os.path.abspath(__file__)), "decoded_images"))
+DECODED_IMAGE_DIR = _cfg.get("decoded_image_dir", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "decoded_images"))
 MONITOR_CACHE_DIR = os.path.join(_cfg["decrypted_dir"], "_monitor_cache")
 WECHAT_BASE_DIR = _cfg.get("wechat_base_dir", "")
 IMAGE_AES_KEY = _cfg.get("image_aes_key")  # V2 格式 AES key (从微信内存提取)

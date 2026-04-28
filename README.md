@@ -17,17 +17,17 @@ pip install -r requirements.txt   # Python 3.10+，微信需运行
 
 | 平台 | 权限 | 解密 DB | 图片密钥 † |
 |---|---|---|---|
-| Windows | 管理员 | `python main.py decrypt` | `python find_image_key_monitor.py` |
-| Linux | root / `CAP_SYS_PTRACE` | `python3 main.py decrypt` | `python find_image_key_monitor.py` |
-| macOS | root + 重签 ‡ | `python3 decrypt_db.py` | `python find_image_key_macos.py` |
+| Windows | 管理员 | `python main.py decrypt` | `python -m wxdec.find_image_key_monitor` |
+| Linux | root / `CAP_SYS_PTRACE` | `python3 main.py decrypt` | `python -m wxdec.find_image_key_monitor` |
+| macOS | root + 重签 ‡ | `python3 -m wxdec.decrypt_db` | `python -m wxdec.find_image_key_macos` |
 
 † Windows / Linux 提图片密钥前需先在微信中点开几张图片让 key 载入内存；macOS 从磁盘派生，无此要求。
 ‡ macOS 首次（及微信升级后）需重签 + 编译扫描器：
 
 ```bash
 sudo codesign --force --deep --sign - /Applications/WeChat.app
-cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
-sudo ./find_all_keys_macos
+cc -O2 -o bin/find_all_keys_macos c_src/find_all_keys_macos.c -framework Foundation
+sudo ./bin/find_all_keys_macos
 ```
 
 首次运行会自动检测微信数据目录并生成 `config.json`。`decrypt` 加 `--with-wal` 把当天 WAL 合进产物（默认关闭以保稳定）；退出码 `0`/`1`/`2` 区分全成功 / DB 失败 / WAL stale；`--db-dir` / `--keys-file` / `--out-dir` 覆盖配置。
@@ -36,9 +36,9 @@ sudo ./find_all_keys_macos
 
 **实时消息流**：`python main.py` → http://localhost:5678（SSE，~100ms 延迟，图片内联预览）。HTTP API: `/api/history`、`/api/tags`、`/stream`。
 
-**Claude MCP 集成**：`claude mcp add wechat -- python /path/to/wechat-decrypt/mcp_server.py`。可用工具：`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。
+**Claude MCP 集成**：`claude mcp add wechat -- python /path/to/wechat-decrypt/wxdec/mcp_server.py`。可用工具：`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。
 
-**[使用案例（截图）→](USAGE.md)**
+**[使用案例（截图）→](docs/usage.md)**
 
 <details>
 <summary><b>详细配置 / 平台前置 / config.json 模板</b></summary>
@@ -132,16 +132,16 @@ V2 文件结构：`[6B signature] [4B aes_size LE] [4B xor_size LE] [1B padding]
 | 文件 | 说明 |
 |------|------|
 | `main.py` | 一键入口（自动配置、提取密钥、启动服务） |
-| `config.py` | 配置加载器（自动检测微信数据目录） |
-| `find_all_keys.py` / `find_all_keys_{windows,linux}.py` | DB 密钥扫描（Windows / Linux） |
-| `find_all_keys_macos.c` | DB 密钥扫描（macOS, Mach VM API） |
-| `decrypt_db.py` | 全量解密所有数据库 |
-| `decode_image.py` | 图片 .dat 解密模块（XOR / V1 / V2） |
-| `find_image_key.py` / `find_image_key_monitor.py` | 图片 AES 密钥提取（Windows / Linux） |
-| `find_image_key_macos.py` | 图片 AES 密钥派生（macOS） |
-| `monitor_web.py` / `monitor.py` | 实时消息监听（Web / CLI） |
-| `mcp_server.py` | MCP Server |
-| `latency_test.py` | 延迟诊断工具 |
+| `wxdec/config.py` | 配置加载器（自动检测微信数据目录） |
+| `wxdec/find_all_keys.py` / `find_all_keys_{windows,linux}.py` | DB 密钥扫描（Windows / Linux） |
+| `c_src/find_all_keys_macos.c` | DB 密钥扫描（macOS, Mach VM API） |
+| `wxdec/decrypt_db.py` | 全量解密所有数据库 |
+| `wxdec/decode_image.py` | 图片 .dat 解密模块（XOR / V1 / V2） |
+| `wxdec/find_image_key.py` / `find_image_key_monitor.py` | 图片 AES 密钥提取（Windows / Linux） |
+| `wxdec/find_image_key_macos.py` | 图片 AES 密钥派生（macOS） |
+| `wxdec/cli/monitor_web.py` / `wxdec/cli/monitor.py` | 实时消息监听（Web / CLI） |
+| `wxdec/mcp_server.py` | MCP Server |
+| `wxdec/latency_test.py` | 延迟诊断工具 |
 
 </details>
 
@@ -157,5 +157,5 @@ V2 文件结构：`[6B signature] [4B aes_size LE] [4B xor_size LE] [1B padding]
 
 - [ylytdeng/wechat-decrypt](https://github.com/ylytdeng/wechat-decrypt) — 本仓库 fork 的上游，提供 SQLCipher 解密、密钥提取等核心能力
 - [LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis) — 朋友圈 XML 解析与时间线结构的参考实现
-- [nobiyou/wx_channel](https://github.com/nobiyou/wx_channel) (MIT) — `pkg/util/isaac64.go` 提供了 WeFlow `WxIsaac64` 的 Go clean-room 实现，本仓库 [sns_isaac.py](sns_isaac.py) 据此移植到 Python（关键差异：PHI 常数尾字节是 `0x13` 而非标准 ISAAC-64 的 `0x15`）
+- [nobiyou/wx_channel](https://github.com/nobiyou/wx_channel) (MIT) — `pkg/util/isaac64.go` 提供了 WeFlow `WxIsaac64` 的 Go clean-room 实现，本仓库 [wxdec/sns_isaac.py](wxdec/sns_isaac.py) 据此移植到 Python（关键差异：PHI 常数尾字节是 `0x13` 而非标准 ISAAC-64 的 `0x15`）
 - [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow) — 朋友圈媒体 ISAAC-64 keystream 与 macOS 图片密钥派生算法的权威参考

@@ -8,7 +8,8 @@ import os
 import platform
 import sys
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_FILE = os.path.join(_PROJECT_ROOT, "config.json")
 
 _SYSTEM = platform.system().lower()
 
@@ -201,7 +202,7 @@ def load_config():
     # 路径展开:先 expanduser(~ 展开),再相对路径转项目内绝对路径。
     # 这样 config 里既能写 "all_keys.json"(项目根相对),也能写
     # "~/Documents/wechat_decrypted"(跨用户便携)。
-    base = os.path.dirname(os.path.abspath(__file__))
+    base = _PROJECT_ROOT
     if cfg.get("db_dir"):
         cfg["db_dir"] = os.path.expanduser(cfg["db_dir"])
     for key in ("keys_file", "decrypted_dir", "decoded_image_dir"):

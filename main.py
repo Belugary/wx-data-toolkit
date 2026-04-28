@@ -13,14 +13,14 @@ import subprocess
 import functools
 print = functools.partial(print, flush=True)
 
-from key_utils import strip_key_metadata
+from wxdec.key_utils import strip_key_metadata
 
 
 def check_wechat_running():
     """检查微信是否在运行，返回 True/False"""
     if platform.system().lower() == "darwin":
         return subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True).returncode == 0
-    from find_all_keys import get_pids
+    from wxdec.find_all_keys import get_pids
     try:
         get_pids()
         return True
@@ -50,7 +50,7 @@ def ensure_keys(keys_file, db_dir):
 
     print("[*] 密钥文件不存在，正在从微信进程提取...")
     print()
-    from find_all_keys import main as extract_keys
+    from wxdec.find_all_keys import main as extract_keys
     try:
         extract_keys()
     except RuntimeError as e:
@@ -81,7 +81,7 @@ def _run_decode_images(cfg, argv):
     (只读已存在的 .dat 文件;V2 文件用 config.json 里的 image_aes_key)。
     """
     import argparse
-    from decode_image import decode_all_dats
+    from wxdec.decode_image import decode_all_dats
 
     parser = argparse.ArgumentParser(
         prog="main.py decode-images",
@@ -172,7 +172,7 @@ def main():
     print()
 
     # 1. 加载配置（自动检测 db_dir）
-    from config import load_config
+    from wxdec.config import load_config
     cfg = load_config()
 
     # 早路由:decode-images 不需要微信进程在运行,也不需要 DB 密钥
@@ -198,12 +198,12 @@ def main():
     if cmd == "decrypt":
         print("[*] 开始解密全部数据库...")
         print()
-        from decrypt_db import main as decrypt_all
+        from wxdec.decrypt_db import main as decrypt_all
         decrypt_all(sys.argv[2:])
     elif cmd == "web":
         print("[*] 启动 Web UI...")
         print()
-        from monitor_web import main as start_web
+        from wxdec.cli.monitor_web import main as start_web
         start_web()
     else:
         print(f"[!] 未知命令: {cmd}")

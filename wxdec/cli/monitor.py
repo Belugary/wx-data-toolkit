@@ -9,7 +9,7 @@ import hmac as hmac_mod
 from datetime import datetime
 from Crypto.Cipher import AES
 import zstandard as zstd
-from key_utils import get_key_info, strip_key_metadata
+from wxdec.key_utils import get_key_info, strip_key_metadata
 
 _zstd_dctx = zstd.ZstdDecompressor()
 
@@ -26,7 +26,7 @@ HMAC_SZ = 64
 RESERVE_SZ = 80
 SQLITE_HDR = b'SQLite format 3\x00'
 
-from config import load_config
+from wxdec.config import load_config
 _cfg = load_config()
 DB_DIR = _cfg["db_dir"]
 KEYS_FILE = _cfg["keys_file"]

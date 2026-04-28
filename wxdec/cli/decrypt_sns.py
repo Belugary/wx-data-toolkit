@@ -37,7 +37,7 @@ from typing import Any, Optional
 import functools
 print = functools.partial(print, flush=True)
 
-from config import load_config
+from wxdec.config import load_config
 
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"

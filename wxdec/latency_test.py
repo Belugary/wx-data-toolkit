@@ -9,7 +9,7 @@ PAGE_SZ = 4096; KEY_SZ = 32; SALT_SZ = 16; RESERVE_SZ = 80
 SQLITE_HDR = b'SQLite format 3\x00'
 WAL_HEADER_SZ = 32; WAL_FRAME_HEADER_SZ = 24
 
-from config import load_config
+from wxdec.config import load_config
 _cfg = load_config()
 DB_DIR = _cfg["db_dir"]
 KEYS_FILE = _cfg["keys_file"]

@@ -2,15 +2,15 @@
 将单个聊天的全部消息导出为 JSON。
 
 用法:
-    .venv/bin/python3 export_chat.py <chat_name> [output.json]
+    .venv/bin/python3 -m wxdec.cli.export_chat <chat_name> [output.json]
 
 参数:
     <chat_name>    联系人显示名、备注名、群名或 wxid。
     [output.json]  可选输出路径，默认 "<chat_name>_export.json"。
 
 示例:
-    .venv/bin/python3 export_chat.py <contact_name>
-    .venv/bin/python3 export_chat.py <group_name> /tmp/out.json
+    .venv/bin/python3 -m wxdec.cli.export_chat <contact_name>
+    .venv/bin/python3 -m wxdec.cli.export_chat <group_name> /tmp/out.json
 
 输出 JSON 的紧凑结构:
     {
@@ -40,7 +40,7 @@ import sys
 from contextlib import closing
 from datetime import datetime
 
-import mcp_server
+from wxdec import mcp_server
 
 
 MSG_TYPE_MAP = {
@@ -242,7 +242,7 @@ def export_chat(chat_name, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 export_chat.py <chat_name> [output.json]")
+        print("Usage: python3 -m wxdec.cli.export_chat <chat_name> [output.json]")
         sys.exit(1)
     chat = sys.argv[1]
     out = sys.argv[2] if len(sys.argv) > 2 else f"{chat}_export.json"

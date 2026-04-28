@@ -15,8 +15,8 @@ import xml.etree.ElementTree as ET
 from Crypto.Cipher import AES
 from mcp.server.fastmcp import FastMCP
 import zstandard as zstd
-from decode_image import ImageResolver
-from key_utils import get_key_info, key_path_variants, strip_key_metadata
+from wxdec.decode_image import ImageResolver
+from wxdec.key_utils import get_key_info, key_path_variants, strip_key_metadata
 
 # ============ 加密常量 ============
 PAGE_SZ = 4096
@@ -28,7 +28,7 @@ WAL_HEADER_SZ = 32
 WAL_FRAME_HEADER_SZ = 24
 
 # ============ 配置加载 ============
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
 with open(CONFIG_FILE, encoding="utf-8") as f:
