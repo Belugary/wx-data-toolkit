@@ -1,127 +1,44 @@
 # WeChat 4.x Database Decryptor
 
-微信 4.0 (Windows / macOS / Linux) 本地数据库解密工具。从运行中的微信进程内存提取加密密钥，解密所有 SQLCipher 4 加密数据库，并提供实时消息监听。
+微信 4.0 (Windows / macOS / Linux) 本地数据库解密工具。从运行中的微信进程内存提取加密密钥，解密 SQLCipher 4 数据库 + `.dat` 图片，并提供实时消息监听。
 
 ## 本 fork 相对原项目的增强
 
 - **`decrypt --with-wal` + CLI override + 分级退出码** — 把当天 `.db-wal` 缓冲合进产物（opt-in），`--db-dir` / `--keys-file` / `--out-dir` 覆盖配置，退出码区分"完全 fresh" / "DB 失败" / "WAL stale"
 - **`decode-images` 子命令** — 一次性把所有 `.dat` 图片解密成镜像 attach 结构的明文文件树，幂等可重跑、原子写、错误隔离
 - **macOS 图片密钥派生** — 从磁盘 kvcomm 缓存推算 AES key，免重签名、免 root、免提前查看图片，解决 [issue #23](https://github.com/ylytdeng/wechat-decrypt/issues/23) 的内存扫描候选爆炸
-- **`config.json` 路径支持 `~` 展开**，跨用户 / 跨机器复用配置不再需要硬编码绝对路径
+- **`config.json` 路径支持 `~` 展开**
 
 ## 快速开始
 
-### 安装
-
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # Python 3.10+，微信需运行
 ```
 
-需要 Python 3.10+ 和正在运行的微信 4.x。
+| 平台 | 权限 | 解密 DB | 图片密钥 † |
+|---|---|---|---|
+| Windows | 管理员 | `python main.py decrypt` | `python find_image_key_monitor.py` |
+| Linux | root / `CAP_SYS_PTRACE` | `python3 main.py decrypt` | `python find_image_key_monitor.py` |
+| macOS | root + 重签 ‡ | `python3 decrypt_db.py` | `python find_image_key_macos.py` |
 
-### 提取密钥 + 解密
-
-**Windows**（需管理员权限）：
-
-```bash
-python main.py decrypt
-```
-
-**Linux**（需 root 或 `CAP_SYS_PTRACE`）：
-
-```bash
-python3 main.py decrypt
-```
-
-**macOS**（首次需重签 + 编译扫描器）：
+† Windows / Linux 提图片密钥前需先在微信中点开几张图片让 key 载入内存；macOS 从磁盘派生，无此要求。
+‡ macOS 首次（及微信升级后）需重签 + 编译扫描器：
 
 ```bash
 sudo codesign --force --deep --sign - /Applications/WeChat.app
 cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
 sudo ./find_all_keys_macos
-python3 decrypt_db.py
 ```
 
-首次运行会自动检测微信数据目录并生成 `config.json`。微信只要在运行中即可，无需重启。
+首次运行会自动检测微信数据目录并生成 `config.json`。`decrypt` 加 `--with-wal` 把当天 WAL 合进产物（默认关闭以保稳定）；退出码 `0`/`1`/`2` 区分全成功 / DB 失败 / WAL stale；`--db-dir` / `--keys-file` / `--out-dir` 覆盖配置。
 
-加 `--with-wal` 把当天 WAL 缓冲合进产物（默认关闭以保持产物稳定）：
+**批量解图**：`python main.py decode-images` → `<chat_hash>/<YYYY-MM>/<file_md5>.<ext>`，幂等、原子写，wxgf 输出 `.hevc` 裸流。
 
-```bash
-python main.py decrypt --with-wal
-```
+**实时消息流**：`python main.py` → http://localhost:5678（SSE，~100ms 延迟，图片内联预览）。HTTP API: `/api/history`、`/api/tags`、`/stream`。
 
-退出码：`0` 全部成功 / `1` DB 解密失败 / `2` WAL 部分 stale（产物可用，仅当天最新消息缺失）。
+**Claude MCP 集成**：`claude mcp add wechat -- python /path/to/wechat-decrypt/mcp_server.py`。可用工具：`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。
 
-`--db-dir` / `--keys-file` / `--out-dir` 可覆盖 `config.json`，方便多账号 / CI / 容器化。`python main.py decrypt --help` 查看完整选项。
-
-### 图片密钥（用于解密 `.dat` 图片）
-
-**Windows / Linux**（从进程内存扫描，需先在微信中点开 2-3 张图片让密钥载入内存）：
-
-```bash
-python find_image_key_monitor.py   # 持续监控版（推荐）
-python find_image_key.py           # 单次扫描
-```
-
-**macOS**（从磁盘 kvcomm 缓存派生，无需扫描内存）：
-
-```bash
-python find_image_key_macos.py
-```
-
-密钥自动写入 `config.json` 的 `image_aes_key` / `image_xor_key` 字段。
-
-### 批量解密所有图片
-
-```bash
-python main.py decode-images
-```
-
-输出目录镜像微信 attach 结构：`<decoded_image_dir>/<chat_hash>/<YYYY-MM>/<file_md5>.<ext>`。幂等（目标存在则跳过，`--force` 强制重解）、原子写、错误隔离、V2 无 key 容错；wxgf 容器输出 `.hevc` 裸流（不做 mp4 转换）。
-
-退出码：`0` 全部成功 / `2` 部分文件失败（产物可用，失败列表见 stderr）。
-
-### Web UI（实时消息流）
-
-```bash
-python main.py
-```
-
-打开 http://localhost:5678。30ms 轮询 WAL → 解密 → SSE 推送，总延迟约 100ms，支持图片内联预览。
-
-#### HTTP API
-
-| 端点 | 说明 |
-|------|------|
-| `GET /api/history` | 最近消息列表，支持 `chat=` / `since=` / `limit=` 组合 |
-| `GET /api/tags` | 联系人标签及成员，支持 `name=` 过滤 |
-| `GET /stream` | SSE 实时消息推送 |
-
-### MCP Server（Claude AI 集成）
-
-让 Claude 直接读取你的微信消息：
-
-```bash
-claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_server.py
-```
-
-或编辑 `~/.claude.json`：
-
-```json
-{
-  "mcpServers": {
-    "wechat": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["C:\\Users\\你的用户名\\wechat-decrypt\\mcp_server.py"]
-    }
-  }
-}
-```
-
-可用工具：`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。前置条件：先跑过一次密钥提取。
-
-**[查看使用案例 →](USAGE.md)**
+**[使用案例（截图）→](USAGE.md)**
 
 <details>
 <summary><b>详细配置 / 平台前置 / config.json 模板</b></summary>
@@ -230,7 +147,7 @@ V2 文件结构：`[6B signature] [4B aes_size LE] [4B xor_size LE] [1B padding]
 
 ## 免责声明
 
-本工具仅用于学习和研究目的，用于解密**自己的**微信数据。请遵守相关法律法规，不要用于未经授权的数据访问。
+本工具仅用于学习和研究目的，用于解密**自己的**微信数据。请遵守相关法律法规。
 
 ## 许可证
 
