@@ -28,7 +28,7 @@ sudo ./bin/find_all_keys_macos
 
 ## 功能
 
-**导出数据库** — `python main.py decrypt` 解密导出全部数据库。`--with-wal` 把当天写入缓冲合进产物；`--db-dir` / `--keys-file` / `--out-dir` 可覆盖默认配置。
+**导出数据库** — `python main.py decrypt` 导出全部数据库。`--with-wal` 把当天写入缓冲合进产物；`--db-dir` / `--keys-file` / `--out-dir` 可覆盖默认配置。
 
 **批量解图** — `python main.py decode-images` 把图片导出到 `<chat_hash>/<YYYY-MM>/<file_md5>.<ext>`，wxgf 视频输出为 `.hevc` 裸流。
 
