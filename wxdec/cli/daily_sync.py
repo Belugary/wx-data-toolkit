@@ -27,6 +27,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 
 print = functools.partial(print, flush=True)
 
@@ -59,22 +60,37 @@ def _log(msg):
 
 
 def _run_step(label, cmd, cwd, *, timeout=1800):
-    """Run a subprocess, mirror its stdout / stderr into our own stdout / stderr
-    so launchd / systemd / schtasks 的日志重定向能把全部内容打包。"""
+    """Run a subprocess, streaming its merged stdout / stderr line-by-line into
+    our log so 长跑步骤(decrypt 全量 + WAL 合并 7.6GB 可能数分钟)在 launchd /
+    systemd / schtasks 日志里实时可见 — buffering 到结束才一次性倾倒, 中途看起来
+    像 hung, 而且 timeout 杀掉时丢失最有价值的卡死前最后输出。"""
     _log(f"--- step: {label} ---")
     _log(f"RUN: {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+
+    def _stream():
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            _log(line.rstrip())
+
+    t = threading.Thread(target=_stream, daemon=True)
+    t.start()
     try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as e:
-        _log(f"TIMEOUT after {timeout}s: {e}")
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc = proc.wait()
+        t.join(timeout=5)
+        _log(f"TIMEOUT after {timeout}s: killed (rc={rc})")
         return None
-    if proc.stdout:
-        _log("STDOUT:\n" + proc.stdout.rstrip())
-    if proc.stderr:
-        _log("STDERR:\n" + proc.stderr.rstrip())
-    _log(f"rc={proc.returncode}")
+    t.join(timeout=5)
+    _log(f"rc={rc}")
     return proc
 
 
@@ -101,7 +117,7 @@ def main():
     # 3. SNS media — only the recent 7-day window. CDN URLs typically expire
     # in ~5 days; 2 days of buffer absorbs sleep cycles / network blips.
     # Best-effort: a single bad day shouldn't fail the whole job.
-    today = datetime.date.today()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
     start = today - datetime.timedelta(days=7)
     end = today + datetime.timedelta(days=1)
     proc = _run_step(
