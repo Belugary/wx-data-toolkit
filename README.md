@@ -57,7 +57,41 @@ sudo ./bin/find_all_keys_macos
 claude mcp add wechat -- python /path/to/wx-data-toolkit/wxdec/mcp_server.py
 ```
 
-可用工具:`get_recent_sessions` / `get_chat_history` / `search_messages` / `get_contacts` / `get_contact_tags` / `get_tag_members` / `get_new_messages`。
+可用工具:
+
+| 工具 | 说明 |
+|---|---|
+| `get_recent_sessions` | 获取最近会话列表 |
+| `get_chat_history(chat_name)` | 获取与指定联系人的聊天历史 |
+| `search_messages(keyword)` | 在所有聊天记录中搜索关键词 |
+| `get_contacts()` | 列出所有联系人 |
+| `get_contact_tags()` | 列出所有联系人标签及成员数量 |
+| `get_tag_members(tag_name)` | 获取指定标签下的所有联系人 |
+| `get_new_messages()` | 获取自上次调用以来的新消息 |
+| `get_voice_messages(chat_name)` | 列出某会话所有语音消息(local_id、时长、时间戳) |
+| `decode_voice(chat_name, local_id)` | 解码 SILK 语音为本地 WAV 文件 |
+| `transcribe_voice(chat_name, local_id)` | 转录语音为文字(自动检测语言) |
+
+#### ⚠️ 语音转录隐私
+
+`transcribe_voice` 默认使用本地 Whisper(CPU), 数据全程留在本机。 `python -m wxdec.cli.transcribe_chat` 批量 CLI 共享同一份配置。
+
+如需切换到 OpenAI Whisper API(更快、中文精度更高), 在 `config.json` 中:
+
+```json
+{
+    "transcription_backend": "openai",
+    "openai_api_key": "sk-..."
+}
+```
+
+启用后**语音文件会上传至 OpenAI 服务器**进行转录。 需 `pip install openai`。
+
+- 成本:约 $0.006 / 分钟(OpenAI 计价)
+- 文件 > 25MB 在上传前被拒绝(OpenAI 上限)
+- 首次启用云后端时 stderr 会打一行警告
+- `transcription_backend` 或 `openai_api_key` 任一缺失时静默回退 local
+- 切换后端后, 旧缓存条目(backend 不匹配)会自动重新转录
 
 → [使用案例:在 Claude 对话里查询微信数据](docs/usage.md)
 
