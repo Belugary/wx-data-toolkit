@@ -324,9 +324,9 @@ def query_sns(
 def _infer_self_wxid_from_path(db_dir: str) -> Optional[str]:
     """从 db_dir 路径反推一个候选名: .../xwechat_files/<dir_name>/db_storage。
 
-    注意 dir_name 不一定是真实 wxid: 微信 4.x 在 macOS 下目录名常带后缀,
-    例如目录 `A_Hare_626a` 但表里的 wxid 是 `A_Hare`。这里只给候选, 是否真实
-    存在要由 _resolve_self_wxid 用 sns.db 验证。
+    注意 dir_name 不一定是真实 wxid: 微信 4.x 在 macOS 下目录名常带 4 字符
+    hex 后缀, 例如目录 `your_wxid_a1b2` 但表里的 wxid 是 `your_wxid`。这里
+    只给候选, 是否真实存在要由 _resolve_self_wxid 用 sns.db 验证。
     """
     parent = os.path.dirname(db_dir.rstrip(os.sep))
     if not parent:
@@ -340,7 +340,7 @@ def _infer_self_wxid_from_path(db_dir: str) -> Optional[str]:
 def _resolve_self_wxid(db_path: str, candidate: Optional[str]) -> Optional[str]:
     """用 sns.db 里实际存在的 user_name 验证候选 wxid; 不匹配时尝试前缀回退。
 
-    回退规则: 候选 `A_Hare_626a` 时, 若表中存在 `A_Hare` 则返回 `A_Hare`。
+    回退规则: 候选 `your_wxid_a1b2` 时, 若表中存在 `your_wxid` 则返回 `your_wxid`。
     都不行就返回 None, 由调用方决定是否降级为"查全部"。
     """
     if not candidate:
