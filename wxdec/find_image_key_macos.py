@@ -494,6 +494,8 @@ def _find_via_bruteforce(db_dir, attach_dir, templates):
     if not xres:
         print("[!] 方案2: V2 .dat 样本不足 (需 >= 3 个), 无法投票反推 xor_key",
               flush=True)
+        print("    请先在微信中再看 2-3 张图片，让缩略图缓存到本地后重试",
+              flush=True)
         return None
     xor_key, votes, total = xres
     if votes == total:
