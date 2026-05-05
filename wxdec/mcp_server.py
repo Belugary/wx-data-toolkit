@@ -7,10 +7,11 @@ Runs on Windows Python (needs access to D:\ WeChat databases).
 
 import io
 import os, sys, json, time, sqlite3, tempfile, struct, hashlib, atexit, re, threading
+import glob
 import wave
 import hmac as hmac_mod
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 from Crypto.Cipher import AES
 from mcp.server.fastmcp import FastMCP
@@ -449,7 +450,11 @@ def _decompress_content(content, ct):
 
 
 def _parse_message_content(content, local_type, is_group):
-    """解析消息内容，返回 (sender_id, text)"""
+    """解析消息内容，返回 (sender_id, text)。
+
+    群消息 content 形如 'wxid_xxx:\n<xml...>'；某些 type=19 合并转发也会
+    写成 'wxid_xxx:<?xml...' 或 'wxid_xxx:<msg...' 不带换行——剥离逻辑两种都要处理。
+    """
     if content is None:
         return '', ''
     if isinstance(content, bytes):
@@ -457,8 +462,15 @@ def _parse_message_content(content, local_type, is_group):
 
     sender = ''
     text = content
-    if is_group and ':\n' in content:
-        sender, text = content.split(':\n', 1)
+    if is_group:
+        if ':\n' in content:
+            sender, text = content.split(':\n', 1)
+        else:
+            # 'sender:<?xml...' / 'sender:<msg...' 等无换行 case
+            m = re.match(r'^([A-Za-z0-9_\-@.]+):(<\?xml|<msg|<msglist|<voipmsg|<sysmsg)', content)
+            if m:
+                sender = m.group(1)
+                text = content[len(sender) + 1:]
 
     return sender, text
 
@@ -555,8 +567,77 @@ def _resolve_quote_sender_label(ref_user, ref_display_name, is_group, chat_usern
     return ''
 
 
-def _parse_xml_root(content):
-    if not content or len(content) > _XML_PARSE_MAX_LEN or _XML_UNSAFE_RE.search(content):
+# 合并转发消息（含 recorditem 内嵌 XML）在 dataitem 数量多时显著超过默认 20K 上限，
+# 实测真实 outer XML 可达 ~500KB。caller 可通过 max_len 参数为 type=19 类大消息放宽限制。
+_RECORD_XML_PARSE_MAX_LEN = 500_000
+
+
+def _safe_basename(name):
+    """对 user-derived filename（从消息 XML 来，不可信）做严格 sanitize。
+
+    Reject 而不是 normalize：哪怕 os.path.basename 把 '../foo' 剥成 'foo' 是
+    safe 的，意图依然可疑，应该显式失败让用户看到。
+    """
+    if not name:
+        return ''
+    if '\x00' in name:
+        return ''
+    if os.path.isabs(name):
+        return ''
+    # 任何 path separator 或 .. component 直接拒（不做 normalize）
+    parts = name.replace('\\', '/').split('/')
+    if any(p in ('', '.', '..') for p in parts) and len(parts) > 1:
+        return ''
+    if len(parts) > 1:
+        return ''
+    if name in ('.', '..'):
+        return ''
+    return name
+
+
+def _path_under_root(path, root):
+    """resolve realpath 后确认仍在 root 下（防 symlink 跳出）。"""
+    try:
+        real_path = os.path.realpath(path)
+        real_root = os.path.realpath(root)
+    except OSError:
+        return False
+    return real_path == real_root or real_path.startswith(real_root + os.sep)
+
+
+# 大附件 md5 校验时的安全上限：超过此 size 直接拒绝校验（避免 MCP 进程
+# 在 100MB+ 视频/附件上一次性 read() 整文件爆内存或长时间阻塞）。
+_MD5_VERIFY_MAX_SIZE = 500 * 1024 * 1024  # 500 MB
+_MD5_CHUNK_SIZE = 64 * 1024  # 64 KB
+
+
+def _md5_file_chunked(path, max_size=_MD5_VERIFY_MAX_SIZE):
+    """流式分块计算文件 md5，避免大文件一次读完爆内存。
+
+    超过 max_size 直接拒绝（DoS 防御 + 大附件 md5 校验现实意义不大）。
+    返回 (md5_hex, error)；成功时 error 为 None。
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        return None, f"无法读取文件 size: {e}"
+    if size > max_size:
+        return None, f"文件 size {size:,} 超过 md5 校验上限 {max_size:,}（防 DoS）"
+    h = hashlib.md5()
+    try:
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(_MD5_CHUNK_SIZE)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except OSError as e:
+        return None, f"读取文件失败: {e}"
+    return h.hexdigest().lower(), None
+
+
+def _parse_xml_root(content, max_len=_XML_PARSE_MAX_LEN):
+    if not content or len(content) > max_len or _XML_UNSAFE_RE.search(content):
         return None
 
     try:
@@ -572,12 +653,25 @@ def _parse_int(value, fallback=0):
         return fallback
 
 
+def _parse_app_message_outer(content):
+    """Parse outer appmsg XML，对 type=19 合并卡片自动放宽到 _RECORD_XML_PARSE_MAX_LEN。
+
+    所有解析 outer appmsg 的 caller（get_chat_history 渲染 / decode_file_message /
+    decode_record_item）共用此 helper，避免同一条大消息在不同 caller 上行为不一致。
+    Substring 短路保证非 type=19 的大 appmsg 不付出 500K parse 代价。"""
+    root = _parse_xml_root(content)
+    if root is None and content and len(content) <= _RECORD_XML_PARSE_MAX_LEN:
+        if '<type>19</type>' in content:
+            root = _parse_xml_root(content, max_len=_RECORD_XML_PARSE_MAX_LEN)
+    return root
+
+
 def _format_app_message_text(content, local_type, is_group, chat_username, chat_display_name, names):
     if not content or '<appmsg' not in content:
         return None
 
     _, sub_type = _split_msg_type(local_type)
-    root = _parse_xml_root(content)
+    root = _parse_app_message_outer(content)
     if root is None:
         return None
 
@@ -610,6 +704,9 @@ def _format_app_message_text(content, local_type, is_group, chat_username, chat_
             quote_text += f"\n  ↳ {prefix}{ref_content}"
         return quote_text
 
+    if app_type == 19:
+        return _format_record_message_text(appmsg, title)
+
     if app_type == 6:
         return f"[文件] {title}" if title else "[文件]"
     if app_type == 5:
@@ -619,6 +716,108 @@ def _format_app_message_text(content, local_type, is_group, chat_username, chat_
     if title:
         return f"[链接/文件] {title}"
     return "[链接/文件]"
+
+
+_RECORD_MAX_ITEMS = 50
+_RECORD_MAX_LINE_LEN = 200
+
+# 合并转发 dataitem 的 datatype → wechat 缓存子目录映射。仅这 4 类有真本地
+# binary 文件；其他 datatype（链接/名片/小程序/视频号 等）只有 metadata。
+_RECORD_BINARY_SUBDIR = {'8': 'F', '2': 'Img', '5': 'V', '4': 'A'}
+
+# datatype → 中文标签，散在多处使用：渲染合并卡片 / decode_record_item 的
+# 错误提示 / 单元测试。统一在模块顶部维护避免漂移。
+_RECORD_DATATYPE_LABEL = {
+    '1': '文本', '2': '图片', '3': '名片', '4': '语音',
+    '5': '视频', '6': '链接', '7': '位置', '8': '文件',
+    '17': '聊天记录', '19': '小程序', '22': '视频号',
+    '23': '视频号直播', '29': '音乐', '36': '小程序/H5',
+    '37': '表情包',
+}
+
+
+def _format_record_dataitem(item):
+    """格式化合并记录中的单个 dataitem，返回展示文本。"""
+    datatype = (item.get('datatype') or '').strip()
+
+    if datatype == '1':
+        return _collapse_text(item.findtext('datadesc') or '') or '[文本]'
+    if datatype in ('2', '3', '4', '5', '7', '23', '37'):
+        return f"[{_RECORD_DATATYPE_LABEL[datatype]}]"
+    if datatype in ('6', '36'):
+        link_title = _collapse_text(item.findtext('datatitle') or '')
+        label = _RECORD_DATATYPE_LABEL[datatype]
+        return f"[{label}] {link_title}" if link_title else f"[{label}]"
+    if datatype == '8':
+        file_title = _collapse_text(item.findtext('datatitle') or '')
+        return f"[文件] {file_title}" if file_title else '[文件]'
+    if datatype == '17':
+        nested_title = _collapse_text(item.findtext('datatitle') or '')
+        return f"[聊天记录] {nested_title}" if nested_title else '[聊天记录]'
+    if datatype == '19':
+        # 小程序：appbranditem/sourcedisplayname 是直接子代，不需要 .// 递归
+        app_name = _collapse_text(item.findtext('appbranditem/sourcedisplayname') or '')
+        item_title = _collapse_text(item.findtext('datatitle') or '')
+        label = item_title or app_name or '小程序'
+        return f"[小程序] {label}"
+    if datatype == '22':
+        feed_desc = _collapse_text(item.findtext('finderFeed/desc') or '')
+        return f"[视频号] {feed_desc[:80]}" if feed_desc else '[视频号]'
+    if datatype == '29':
+        song = _collapse_text(item.findtext('datatitle') or '')
+        artist = _collapse_text(item.findtext('datadesc') or '')
+        if song and artist:
+            return f"[音乐] {song} - {artist}"
+        return f"[音乐] {song}" if song else '[音乐]'
+
+    desc = _collapse_text(item.findtext('datadesc') or '')
+    title_text = _collapse_text(item.findtext('datatitle') or '')
+    fallback = desc or title_text
+    return fallback if fallback else f"[未知类型 {datatype}]"
+
+
+def _format_record_message_text(appmsg, title):
+    """解析合并转发的聊天记录卡片（appmsg type=19, recorditem）。"""
+    fallback_title = title or '聊天记录'
+    record_node = appmsg.find('recorditem')
+    if record_node is None or not record_node.text:
+        return f"[聊天记录] {fallback_title}（待加载）"
+
+    inner = _parse_xml_root(record_node.text, max_len=_RECORD_XML_PARSE_MAX_LEN)
+    if inner is None:
+        return f"[聊天记录] {fallback_title}"
+
+    record_title = _collapse_text(inner.findtext('title') or '') or fallback_title
+    is_chatroom = (inner.findtext('isChatRoom') or '').strip() == '1'
+    datalist = inner.find('datalist')
+    items = list(datalist.findall('dataitem')) if datalist is not None else []
+    if not items:
+        suffix = "（群聊转发，待加载）" if is_chatroom else "（待加载）"
+        return f"[聊天记录] {record_title}{suffix}"
+
+    header = f"[聊天记录] {record_title}"
+    if is_chatroom:
+        header += "（群聊转发）"
+    header += f"，共 {len(items)} 条"
+
+    lines = [header + ":"]
+    for idx, item in enumerate(items[:_RECORD_MAX_ITEMS]):
+        sender = _collapse_text(item.findtext('sourcename') or '')
+        when = _collapse_text(item.findtext('sourcetime') or '')
+        content = _format_record_dataitem(item)
+
+        if len(content) > _RECORD_MAX_LINE_LEN:
+            content = content[:_RECORD_MAX_LINE_LEN] + '…'
+
+        # 0-based index 让用户能用 decode_record_item(chat, local_id, item_index) 引用
+        prefix_parts = [f"[{idx}]"] + [p for p in (when, sender) if p]
+        prefix = ' '.join(prefix_parts)
+        lines.append(f"  {prefix}: {content}")
+
+    if len(items) > _RECORD_MAX_ITEMS:
+        lines.append(f"  …（还有 {len(items) - _RECORD_MAX_ITEMS} 条未显示）")
+
+    return "\n".join(lines)
 
 
 def _format_voip_message_text(content):
@@ -650,20 +849,37 @@ def _format_voip_message_text(content):
     return f"[通话] {status_map.get(raw_text, raw_text)}"
 
 
-def _format_message_text(local_id, local_type, content, is_group, chat_username, chat_display_name, names):
+def _format_message_text(local_id, local_type, content, is_group, chat_username, chat_display_name, names, create_time=0):
     sender_from_content, text = _parse_message_content(content, local_type, is_group)
     base_type, _ = _split_msg_type(local_type)
 
+    # 同一 chat 的消息可能跨 message_N.db 分片，导致 local_id 跨分片冲突。
+    # 把 create_time 一起注入到输出，让 decode_file_message / decode_record_item
+    # 能用 (local_id, create_time) 唯一定位 row。
+    def _id_suffix():
+        return f"(local_id={local_id}, ts={create_time})" if create_time else f"(local_id={local_id})"
+
     if base_type == 3:
-        text = f"[图片] (local_id={local_id})"
+        text = f"[图片] {_id_suffix()}"
     elif base_type == 47:
         text = "[表情]"
     elif base_type == 50:
         text = _format_voip_message_text(text) or "[通话]"
     elif base_type == 49:
-        text = _format_app_message_text(
+        formatted = _format_app_message_text(
             text, local_type, is_group, chat_username, chat_display_name, names
         ) or "[链接/文件]"
+        if formatted.startswith('[文件]'):
+            formatted = f"{formatted} {_id_suffix()}"
+        elif formatted.startswith('[聊天记录]'):
+            # 多行：把 ID 后缀放在 header 末尾，":" 之前
+            if '\n' in formatted:
+                first_line, rest = formatted.split('\n', 1)
+                first_line_no_colon = first_line.rstrip(':').rstrip()
+                formatted = f"{first_line_no_colon} {_id_suffix()}:\n{rest}"
+            else:
+                formatted = f"{formatted} {_id_suffix()}"
+        text = formatted
     elif base_type != 1:
         type_label = format_msg_type(local_type)
         text = f"[{type_label}] {text}" if text else f"[{type_label}]"
@@ -924,7 +1140,8 @@ def _build_search_entry(row, ctx, names, id_to_username):
         return None
 
     sender, text = _format_message_text(
-        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names
+        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names,
+        create_time=create_time,
     )
     if text and len(text) > 300:
         text = text[:300] + '...'
@@ -954,7 +1171,8 @@ def _build_history_line(row, ctx, names, id_to_username):
         content = '(无法解压)'
 
     sender, text = _format_message_text(
-        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names
+        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names,
+        create_time=create_time,
     )
 
     sender_label = _resolve_sender_label(
@@ -1701,6 +1919,564 @@ def decode_image(chat_name: str, local_id: int) -> str:
         if 'md5' in result:
             error += f"\n  MD5: {result['md5']}"
         return f"解密失败: {error}"
+
+
+@mcp.tool()
+def decode_file_message(chat_name: str, local_id: int, create_time: int = 0) -> str:
+    """获取微信聊天中外层文件消息（PDF/docx/xlsx 等）的本地副本路径。
+
+    微信会把对方发来的文件下载到 ~/Library/.../msg/file/{YYYY-MM}/原文件名.{ext}
+    （macOS）。本工具从消息记录解析出文件名/大小，在本地缓存中精确定位，
+    然后返回原始路径，可直接交给 Read/PDF 工具读取。
+
+    使用流程：先用 get_chat_history 找到 [文件] xxx.pdf (local_id=N, ts=T)，
+    把 N 和 T 一起传给本工具。create_time(ts) 用于跨分片场景下唯一定位。
+
+    Args:
+        chat_name: 聊天对象的名字、备注名或wxid
+        local_id: 文件消息的 local_id（从 get_chat_history 获取）
+        create_time: 消息的 unix 时间戳，从 get_chat_history 输出 ts=N 部分获取。
+            用于在 local_id 跨分片冲突时唯一定位；传 0 时若多个分片含同 local_id 会报歧义错误
+    """
+    try:
+        local_id = int(local_id)
+        create_time = int(create_time)
+    except (TypeError, ValueError):
+        return "错误: local_id 和 create_time 必须是整数"
+
+    username = resolve_username(chat_name)
+    if not username:
+        return f"找不到聊天对象: {chat_name}"
+
+    # 同一 chat 的消息可能分散在多个 message_N.db 分片中。扫所有分片收集 row，
+    # 多于一条就报歧义错误（避免 silent decoding wrong message）。
+    shards = _find_msg_tables_for_user(username)
+    if not shards:
+        return f"找不到 {chat_name} 的消息表"
+
+    # 扫所有分片收集 row。如果调用者传了 create_time，用 (local_id, create_time)
+    # 精确匹配；否则只按 local_id 收集，多匹配时报歧义并提示加 create_time。
+    matches = []
+    for shard in shards:
+        if not _is_safe_msg_table_name(shard['table_name']):
+            continue
+        with closing(sqlite3.connect(shard['db_path'])) as conn:
+            if create_time:
+                candidate_row = conn.execute(
+                    f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
+                    f"FROM [{shard['table_name']}] WHERE local_id=? AND create_time=?",
+                    (local_id, create_time)
+                ).fetchone()
+            else:
+                candidate_row = conn.execute(
+                    f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
+                    f"FROM [{shard['table_name']}] WHERE local_id=?",
+                    (local_id,)
+                ).fetchone()
+        if candidate_row:
+            matches.append((shard['db_path'], candidate_row))
+    if not matches:
+        if create_time:
+            return f"找不到 (local_id={local_id}, create_time={create_time}) 的消息（已扫描 {len(shards)} 个分片）"
+        return f"找不到 local_id={local_id} 的消息（已扫描 {len(shards)} 个分片）"
+    if len(matches) > 1:
+        details = []
+        for db_p, r in matches:
+            ct = r[1]
+            ts_str = datetime.fromtimestamp(ct).isoformat() if ct else '?'
+            details.append(f"{os.path.basename(db_p)} create_time={ct} ({ts_str})")
+        return (
+            f"local_id={local_id} 在 {len(matches)} 个分片中都存在，无法唯一定位:\n  "
+            + '\n  '.join(details)
+            + f"\n请加 create_time 参数：decode_file_message(chat_name, local_id={local_id}, create_time=N)"
+        )
+
+    _, row = matches[0]
+    local_type, create_time, content, ct_compress = row
+    base_type, _ = _split_msg_type(local_type)
+    if base_type != 49:
+        return (
+            f"不是文件消息（local_type={local_type}，base_type={base_type}），"
+            f"文件消息应为 base_type=49 且 appmsg type=6"
+        )
+
+    xml_text = _decompress_content(content, ct_compress)
+    if not xml_text:
+        return "消息 content 为空或无法解码"
+
+    # 复用项目内现有 helper 剥离群聊 sender 前缀，避免自己写启发式
+    is_group = username.endswith('@chatroom')
+    _, xml_text = _parse_message_content(xml_text, local_type, is_group)
+
+    root = _parse_app_message_outer(xml_text)
+    if root is None:
+        return "无法解析消息 XML"
+
+    appmsg = root.find('.//appmsg')
+    if appmsg is None:
+        return "消息中没有 appmsg 段（可能不是文件类型）"
+
+    # 必须是 appmsg type=6 (文件)，否则可能是链接/小程序/合并转发等带 title 的卡片，
+    # 按 title/size 全盘搜会误命中无关本地文件并伪装成"找到了"。
+    app_type_in_msg = _parse_int(_collapse_text(appmsg.findtext('type') or ''), 0)
+    if app_type_in_msg != 6:
+        return (
+            f"不是文件消息（appmsg type={app_type_in_msg}）。"
+            f"文件消息要求 appmsg type=6；type=19 请用 decode_record_item，"
+            f"type=5/33/36/44 等是链接/小程序，没有可下载的本地文件"
+        )
+
+    raw_title = _collapse_text(appmsg.findtext('title') or '')
+    fileext = _collapse_text(appmsg.findtext('.//fileext') or '')
+    totallen = _parse_int(_collapse_text(appmsg.findtext('.//totallen') or ''), 0)
+    # md5 字段在 type=6 外层（不是 appattach 子节点）—— 用于强校验候选文件归属
+    expected_md5 = _collapse_text(appmsg.findtext('md5') or '').lower()
+
+    # 没有 appattach 节点 = 不是真正的文件消息（type=6 必带 appattach）
+    if appmsg.find('appattach') is None:
+        return "消息没有 appattach 节点（可能 schema 异常或不是真文件消息）"
+
+    if not raw_title:
+        return "消息中没有文件名 (title)"
+
+    # title 来自不可信的 message XML，对方可能发恶意消息（含绝对路径或 ../）。
+    # 必须 sanitize 成 safe basename 才能拼路径 + glob，否则有 path-traversal 风险。
+    title = _safe_basename(raw_title)
+    if not title:
+        return f"消息中的文件名 {raw_title!r} 不安全（含绝对路径/路径分隔符/..），拒绝处理"
+
+    # 性能优化：先按消息时间精确定位 msg/file/{YYYY-MM}/，命中即返回；
+    # 否则才退回 walk 全盘 os.walk（msg/attach 含数十万小文件，全盘扫描可达数秒）
+    candidates = []
+    msg_file_dir = os.path.join(WECHAT_BASE_DIR, 'msg/file')
+    if create_time and os.path.isdir(msg_file_dir):
+        # 同名文件可能落到收到消息的当月、上一月或下一月（罕见跨月边界）
+        ts_dt = datetime.fromtimestamp(create_time)
+        candidate_months = {
+            ts_dt.strftime('%Y-%m'),
+            (ts_dt - timedelta(days=31)).strftime('%Y-%m'),
+            (ts_dt + timedelta(days=31)).strftime('%Y-%m'),
+        }
+        escaped_stem = glob.escape(os.path.splitext(title)[0])
+        ext = os.path.splitext(title)[1]
+        for ym in candidate_months:
+            month_dir = os.path.join(msg_file_dir, ym)
+            if not os.path.isdir(month_dir):
+                continue
+            # 精确匹配 + 同名 (1)(2) 后缀变体
+            for pattern in (
+                glob.escape(title),
+                f"{escaped_stem}*{glob.escape(ext)}" if ext else f"{escaped_stem}*",
+            ):
+                for hit in glob.glob(os.path.join(month_dir, pattern)):
+                    # 有 totallen 时立刻 size 验证：避免月扫命中"同名但 size 不对"的副本
+                    # 阻塞 walk 兜底，最终返回错误文件
+                    if totallen:
+                        try:
+                            if os.path.getsize(hit) != totallen:
+                                continue
+                        except OSError:
+                            continue
+                    if hit not in candidates:
+                        candidates.append(hit)
+
+    # 退路：未命中或没 create_time 时只 walk msg/file（slow path 兜底）。
+    # 文件名匹配严格化：只接受精确匹配或 wechat 自动加副本的 "(N)" 后缀变体，
+    # 不做 stem 子串匹配——避免 "某某论文.pdf" 被当成 "论文.pdf"。
+    if not candidates:
+        d = os.path.join(WECHAT_BASE_DIR, 'msg/file')
+        stem, ext = os.path.splitext(title)
+        copy_pattern = re.compile(
+            r'^' + re.escape(stem) + r' ?\(\d+\)' + re.escape(ext) + r'$'
+        )
+        if os.path.isdir(d):
+            for root_dir, _, files in os.walk(d):
+                for f in files:
+                    if f.startswith('.'):
+                        continue
+                    full = os.path.join(root_dir, f)
+                    is_exact = (f == title)
+                    is_copy_variant = bool(copy_pattern.match(f))
+                    if not (is_exact or is_copy_variant):
+                        continue
+                    if totallen:
+                        try:
+                            if os.path.getsize(full) != totallen:
+                                continue
+                        except OSError:
+                            continue
+                    candidates.append(full)
+
+    if not candidates:
+        return (
+            f"在本地缓存中找不到 {title}\n"
+            f"  期望路径模式: {WECHAT_BASE_DIR}/msg/file/YYYY-MM/{title}\n"
+            f"  可能原因：从未在 PC/Mac 微信打开过 / 已被清理"
+        )
+
+    # 严格 size 过滤（如果 totallen 已知，不匹配的全淘汰）
+    if totallen:
+        candidates = [c for c in candidates if os.path.getsize(c) == totallen]
+        if not candidates:
+            return (
+                f"在本地缓存中找不到 {title} (期望 size={totallen:,})\n"
+                f"  说明：找到了同名文件但 size 都不匹配——可能从未真正下载完整 / 已被清理"
+            )
+
+    # 路径绑定策略：有 md5 → cryptographic verify；没 md5 → heuristic +
+    # warning。本工具是用户主动通过 MCP 调用，path 只在本地对话显示，所以
+    # 没 md5 时不强制 fail-closed。
+    cache_root = os.path.join(WECHAT_BASE_DIR, 'msg')
+    md5_verified = False
+    if expected_md5 and len(expected_md5) == 32:
+        # 用 md5 过滤候选——同 md5 = 真同一文件副本。
+        md5_match = []
+        md5_errors = []
+        for c in candidates:
+            if not _path_under_root(c, cache_root):
+                md5_errors.append(f"{c}: 不在 {cache_root} 下，跳过")
+                continue
+            actual_md5, err = _md5_file_chunked(c)
+            if err:
+                md5_errors.append(f"{c}: {err}")
+                continue
+            if actual_md5 == expected_md5:
+                md5_match.append(c)
+                break  # 多候选共享同 md5 = 同一文件副本，第一个命中即停
+        if not md5_match:
+            info = (
+                f"⚠️ 候选文件 md5 都不匹配，拒绝返回错文件:\n"
+                f"  期望 md5: {expected_md5}\n"
+                f"  说明：找到 {len(candidates)} 个同名同 size 的本地文件但 md5 都不对。"
+                f"目标文件可能未在 wechat 客户端打开过，或已被清理。"
+            )
+            if md5_errors:
+                info += "\n  校验异常：\n    " + "\n    ".join(md5_errors)
+            return info
+        candidates = md5_match
+        md5_verified = True
+
+    # 没 md5 时多 candidates 仍 fail-closed（避免 silent mtime pick）
+    if len(candidates) > 1 and not md5_verified:
+        details = []
+        for c in candidates:
+            try:
+                mt = datetime.fromtimestamp(os.path.getmtime(c)).isoformat()
+            except OSError:
+                mt = '?'
+            details.append(f"{c} (mtime={mt})")
+        return (
+            f"在本地缓存找到 {len(candidates)} 个匹配的副本，无法唯一定位"
+            f"（同名同 size 多份，且消息 XML 没含 md5 用于强校验）:\n  "
+            + '\n  '.join(details)
+            + f"\n请人工 inspect mtime / 上下文区分"
+        )
+
+    chosen = candidates[0]
+    if not _path_under_root(chosen, cache_root):
+        return f"匹配到的路径 {chosen!r} 不在 {cache_root} 下，拒绝返回（可能是 symlink 攻击）"
+
+    binding_note = (
+        "✅ md5 校验通过，路径与消息唯一绑定"
+        if md5_verified else
+        f"⚠️  消息 XML 没含 md5，路径基于 (filename+size) 启发式匹配——"
+        f"如果同 chat 缓存里另有同名同 size 的不相关文件，可能返回错副本，请人工验证。"
+    )
+    return (
+        f"找到本地文件:\n"
+        f"  路径: {chosen}\n"
+        f"  大小: {os.path.getsize(chosen):,} bytes\n"
+        f"  扩展名: {fileext or os.path.splitext(title)[1].lstrip('.') or '?'}\n"
+        f"  期望大小: {totallen:,} bytes\n"
+        f"  {binding_note}"
+    )
+
+
+@mcp.tool()
+def decode_record_item(chat_name: str, local_id: int, item_index: int, create_time: int = 0) -> str:
+    """获取合并转发聊天记录中某个内嵌文件/图片的本地副本路径。
+
+    使用流程：
+    1. 先用 get_chat_history 找到 [聊天记录] xxx (local_id=N, ts=T) 卡片，记下 N 和 T，
+       以及展开行里 [item_index] 前缀（0-based）
+    2. 用本工具拿本地路径，create_time 传 history 里的 ts 部分
+    3. 如果未下载，工具会精确告诉你去 wechat 客户端点击合并卡片里的第几项触发下载
+
+    注意：合并转发里的内嵌文件只有在用户**点击查看**后 wechat 才会下载到本地。
+    没点过的 dataitem 用本工具会得到"未下载"提示。
+
+    Args:
+        chat_name: 聊天对象的名字、备注名或wxid
+        local_id: 合并转发消息（带"[聊天记录]"标记）的 local_id
+        item_index: dataitem 在 datalist 里的 0-based 索引（history 输出里的 [N] 前缀）
+        create_time: 消息的 unix 时间戳；用于跨分片唯一定位，传 0 时多匹配会报歧义
+    """
+    try:
+        local_id = int(local_id)
+        item_index = int(item_index)
+        create_time = int(create_time)
+    except (TypeError, ValueError):
+        return "错误: local_id / item_index / create_time 必须是整数"
+
+    username = resolve_username(chat_name)
+    if not username:
+        return f"找不到聊天对象: {chat_name}"
+
+    # 多分片扫描 + ambiguity 检测（避免 silent decoding wrong message，参考 decode_file_message）
+    shards = _find_msg_tables_for_user(username)
+    if not shards:
+        return f"找不到 {chat_name} 的消息表"
+
+    matches = []
+    for shard in shards:
+        if not _is_safe_msg_table_name(shard['table_name']):
+            continue
+        with closing(sqlite3.connect(shard['db_path'])) as conn:
+            if create_time:
+                candidate_row = conn.execute(
+                    f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
+                    f"FROM [{shard['table_name']}] WHERE local_id=? AND create_time=?",
+                    (local_id, create_time)
+                ).fetchone()
+            else:
+                candidate_row = conn.execute(
+                    f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
+                    f"FROM [{shard['table_name']}] WHERE local_id=?",
+                    (local_id,)
+                ).fetchone()
+        if candidate_row:
+            matches.append((shard['table_name'], candidate_row))
+    if not matches:
+        if create_time:
+            return f"找不到 (local_id={local_id}, create_time={create_time}) 的消息（已扫描 {len(shards)} 个分片）"
+        return f"找不到 local_id={local_id} 的消息（已扫描 {len(shards)} 个分片）"
+    if len(matches) > 1:
+        details = []
+        for tn, r in matches:
+            ts_str = datetime.fromtimestamp(r[1]).isoformat() if r[1] else '?'
+            details.append(f"table={tn[:12]}... create_time={r[1]} ({ts_str})")
+        return (
+            f"local_id={local_id} 在 {len(matches)} 个分片中都存在，无法唯一定位:\n  "
+            + '\n  '.join(details)
+            + f"\n请加 create_time 参数：decode_record_item(chat_name, local_id={local_id}, item_index={item_index}, create_time=N)"
+        )
+
+    table_name, row = matches[0]
+    local_type, _create_time, content, ct_compress = row
+    base_type, _ = _split_msg_type(local_type)
+    if base_type != 49:
+        return (
+            f"不是合并转发消息（local_type={local_type}, base_type={base_type}），"
+            f"合并转发应为 base_type=49 + appmsg type=19"
+        )
+
+    xml_text = _decompress_content(content, ct_compress)
+    if not xml_text:
+        return "消息 content 为空或无法解码"
+
+    # 复用项目内现有 helper 剥离群聊 sender 前缀，避免自己写启发式
+    is_group = username.endswith('@chatroom')
+    _, xml_text = _parse_message_content(xml_text, local_type, is_group)
+
+    root = _parse_app_message_outer(xml_text)
+    if root is None:
+        return "无法解析消息 XML（可能不是合并转发消息）"
+    appmsg = root.find('.//appmsg')
+    if appmsg is None:
+        return "消息中没有 appmsg 段"
+
+    app_type = _parse_int(_collapse_text(appmsg.findtext('type') or ''), 0)
+    if app_type != 19:
+        return (
+            f"不是合并转发消息（appmsg type={app_type}），"
+            f"合并转发应为 type=19。请用 decode_file_message 处理外层独立文件"
+        )
+
+    record_node = appmsg.find('recorditem')
+    if record_node is None or not record_node.text:
+        return "消息中没有 recorditem（datalist 还未加载，请在 wechat 中点开此卡片让客户端拉取）"
+
+    inner = _parse_xml_root(record_node.text, max_len=_RECORD_XML_PARSE_MAX_LEN)
+    if inner is None:
+        return "无法解析 recorditem 内嵌 XML"
+
+    datalist = inner.find('datalist')
+    items = list(datalist.findall('dataitem')) if datalist is not None else []
+    if not items:
+        return "datalist 为空（合并记录还未加载内容）"
+    if item_index < 0 or item_index >= len(items):
+        return f"item_index={item_index} 超出范围（共 {len(items)} 条 dataitem，0-based）"
+
+    item = items[item_index]
+    datatype = (item.get('datatype') or '').strip()
+    raw_datatitle = _collapse_text(item.findtext('datatitle') or '')
+    # datatitle 来自不可信 XML，sanitize 防 path traversal
+    datatitle = _safe_basename(raw_datatitle) if raw_datatitle else ''
+    if raw_datatitle and not datatitle:
+        return f"该 dataitem 的 datatitle {raw_datatitle!r} 不安全（含绝对路径/分隔符/..），拒绝处理"
+    datasize = _parse_int(_collapse_text(item.findtext('datasize') or ''), 0)
+    datafmt = _collapse_text(item.findtext('datafmt') or '')
+    sourcename = _collapse_text(item.findtext('sourcename') or '')
+    # fullmd5 是文件内容唯一标识，用于把候选绑定到这条 record，避免误命中
+    # 同 chat 内别条 record 的同名同 size 文件。
+    expected_md5 = _collapse_text(item.findtext('fullmd5') or '').lower()
+
+    type_label = _RECORD_DATATYPE_LABEL.get(datatype, f'datatype={datatype}')
+
+    if datatype == '1':
+        text_content = _collapse_text(item.findtext('datadesc') or '')
+        return (
+            f"该 dataitem 是文本，无需下载:\n"
+            f"  发送者: {sourcename}\n"
+            f"  内容: {text_content}"
+        )
+
+    # 仅以下 datatype 在 wechat 缓存里有真本地 binary（图片/语音/视频/文件）；
+    # 其他类型如链接/位置/名片/小程序/视频号/嵌套聊天记录等只是 metadata，
+    # 没有可下载的本地副本。不在白名单里的 datatype 直接拒绝，避免 wildcard
+    # sub='*' 通配命中无关 record 的同名文件。
+    subdir_map = _RECORD_BINARY_SUBDIR
+    if datatype not in subdir_map:
+        return (
+            f"该 dataitem 类型 [{type_label}] 没有本地 binary 文件，无需下载\n"
+            f"  发送者: {sourcename}\n"
+            f"  标题: {datatitle or '(无)'}\n"
+            f"  说明：仅 datatype=2/4/5/8（图片/语音/视频/文件）有可下载内容；"
+            f"链接/位置/名片/小程序/视频号/嵌套聊天记录等是 metadata-only。"
+            f"\n如果你需要这条 dataitem 的 metadata 详情，看 get_chat_history 输出里"
+            f"已展开的 [{item_index}] 行内容即可。"
+        )
+
+    table_hash = table_name.replace('Msg_', '', 1)
+    attach_dir = os.path.join(WECHAT_BASE_DIR, 'msg/attach', table_hash)
+
+    candidates = []
+    if os.path.isdir(attach_dir):
+        import glob as glob_mod
+        sub = subdir_map.get(datatype, '*')
+        idx_str = str(item_index)
+
+        # datatype=2 图片走 flat 文件命名 (Img/0_t / Img/0 / Img/0.{ext})，
+        # 不像文件类的 F/{idx}/{filename}。
+        if datatype == '2':
+            flat_patterns = [
+                f"{idx_str}_t",
+                idx_str,
+                f"{idx_str}.*",
+                f"{idx_str}_*",
+            ]
+            for fp in flat_patterns:
+                for hit in glob.glob(os.path.join(attach_dir, '*/Rec/*', sub, fp)):
+                    if datasize:
+                        try:
+                            if os.path.getsize(hit) != datasize:
+                                continue
+                        except OSError:
+                            continue
+                    if hit not in candidates:
+                        candidates.append(hit)
+
+        # 文件 / 视频 / 语音类: F|V|A/{idx}/{filename}
+        if datatype != '2' and datatitle:
+            escaped_title = glob.escape(datatitle)
+            for hit in glob.glob(os.path.join(attach_dir, '*/Rec/*', sub, idx_str, escaped_title)):
+                if datasize:
+                    try:
+                        if os.path.getsize(hit) != datasize:
+                            continue
+                    except OSError:
+                        continue
+                if hit not in candidates:
+                    candidates.append(hit)
+
+        # size only 兜底：仅在 datatitle 缺失且非 image（image 已上面处理）时启用
+        if not candidates and not datatitle and datasize and datatype != '2':
+            for hit in glob.glob(os.path.join(attach_dir, '*/Rec/*', sub, idx_str, '*')):
+                try:
+                    if os.path.getsize(hit) == datasize:
+                        candidates.append(hit)
+                except OSError:
+                    pass
+
+    if not candidates:
+        return (
+            f"在本地缓存中找不到此 dataitem（很可能未在 wechat 客户端点击查看过）\n"
+            f"  消息: {chat_name} 的 local_id={local_id}\n"
+            f"  dataitem[{item_index}]: {sourcename}: [{type_label}] {datatitle or '(无标题)'}\n"
+            f"  期望大小: {datasize:,} bytes\n"
+            f"  期望路径模式: {attach_dir}/YYYY-MM/Rec/*/{subdir_map.get(datatype, '?')}/{item_index}/{datatitle}\n"
+            f"  解决方法: 在 wechat 客户端打开此合并记录卡片，点击第 {item_index + 1} 项让客户端下载，再试"
+        )
+
+    # 注意：早 ambiguity check（在 md5 filter 之前）已经被删除——它会让有 fullmd5
+    # 但多 candidates 的合理 case silent 失败。md5 filter 后再做歧义判断（见下方）。
+    # 威胁模型：本工具是用户主动通过 MCP 调用 + path 只在本地显示。
+    # 跟 decode_file_message 一致路线：有 md5 强校验，没 md5 fallback 到
+    # heuristic + warning（实用 over 严格）。
+    cache_root = os.path.join(WECHAT_BASE_DIR, 'msg')
+    md5_verified = False
+    if expected_md5 and len(expected_md5) == 32:
+        md5_match = []
+        md5_errors = []
+        for c in candidates:
+            if not _path_under_root(c, cache_root):
+                md5_errors.append(f"{c}: 不在 {cache_root} 下，跳过")
+                continue
+            actual_md5, err = _md5_file_chunked(c)
+            if err:
+                md5_errors.append(f"{c}: {err}")
+                continue
+            if actual_md5 == expected_md5:
+                md5_match.append(c)
+                break  # 多候选共享同 md5 = 同一文件副本，第一个命中即停
+        if not md5_match:
+            info = (
+                f"⚠️ 候选文件 md5 都不匹配，拒绝返回错文件:\n"
+                f"  期望 md5: {expected_md5}\n"
+                f"  说明：候选 {len(candidates)} 个，md5 都不对。"
+                f"目标 dataitem 可能未在 wechat 客户端点开过，请点击第 {item_index + 1} 项触发下载。"
+            )
+            if md5_errors:
+                info += "\n  校验异常：\n    " + "\n    ".join(md5_errors)
+            return info
+        candidates = md5_match
+        md5_verified = True
+
+    # 没 fullmd5 时多 candidates 仍 fail-closed
+    if len(candidates) > 1 and not md5_verified:
+        details = []
+        for c in candidates:
+            try:
+                mt = datetime.fromtimestamp(os.path.getmtime(c)).isoformat()
+            except OSError:
+                mt = '?'
+            details.append(f"{c} (mtime={mt})")
+        return (
+            f"找到 {len(candidates)} 个匹配的本地副本，无法唯一定位"
+            f"（同位置同名同 size 多份，且 dataitem XML 没含 fullmd5 用于强校验）:\n  "
+            + '\n  '.join(details)
+            + f"\n请人工 inspect mtime / 上下文区分"
+        )
+
+    chosen = candidates[0]
+    if not _path_under_root(chosen, cache_root):
+        return f"匹配到的路径 {chosen!r} 不在 {cache_root} 下，拒绝返回（可能是 symlink 攻击）"
+
+    binding_note = (
+        "✅ md5 校验通过，路径与 dataitem 唯一绑定"
+        if md5_verified else
+        f"⚠️  此 dataitem XML 没含 fullmd5，路径基于 (item_index+filename+size) 启发式匹配——"
+        f"如果同 chat 内多条合并卡片碰巧含同位置同名同 size 的文件，可能返回别条 record 的副本，请人工验证。"
+    )
+    return (
+        f"找到本地文件:\n"
+        f"  路径: {chosen}\n"
+        f"  大小: {os.path.getsize(chosen):,} bytes\n"
+        f"  期望大小: {datasize:,} bytes\n"
+        f"  发送者: {sourcename}\n"
+        f"  类型: [{type_label}] {datatitle or '(无标题)'}\n"
+        f"  {binding_note}"
+    )
 
 
 @mcp.tool()
