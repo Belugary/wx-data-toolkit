@@ -208,7 +208,8 @@ def _make_sns_db(xmls: list[tuple[int, str, str]],
             "  type INTEGER, feed_id INTEGER,"
             "  from_username TEXT, from_nickname TEXT,"
             "  to_username TEXT, content TEXT,"
-            "  create_time INTEGER, comment_id INTEGER, comment64_id INTEGER)"
+            "  create_time INTEGER, comment_id INTEGER, comment64_id INTEGER,"
+            "  del_status INTEGER DEFAULT 0)"
         )
         conn.executemany(
             "INSERT INTO SnsTimeLine (tid, user_name, content) VALUES (?, ?, ?)",
@@ -329,9 +330,9 @@ class TestQueryInteractions(unittest.TestCase):
             self.assertEqual(len(ix[100]["likes"]), 2)
             self.assertEqual(len(ix[100]["comments"]), 1)
             self.assertEqual(ix[100]["comments"][0]["content"], "nice!")
-            self.assertEqual(ix[100]["comments"][0]["from"], "wxid_bob")
-            self.assertEqual(ix[100]["likes"][0]["from"], "wxid_alice")
-            self.assertIn("timeIso", ix[100]["likes"][0])
+            self.assertEqual(ix[100]["comments"][0]["fromUsername"], "wxid_bob")
+            self.assertEqual(ix[100]["likes"][0]["fromUsername"], "wxid_alice")
+            self.assertIn("createTimeIso", ix[100]["likes"][0])
         finally:
             Path(db).unlink(missing_ok=True)
 
@@ -346,6 +347,44 @@ class TestQueryInteractions(unittest.TestCase):
             self.assertEqual(set(ix.keys()), {100})
         finally:
             Path(db).unlink(missing_ok=True)
+
+    def test_soft_deleted_interactions_filtered(self):
+        # del_status != 0 = 对方撤回, 微信本地不真删, 我们过滤掉
+        interactions = [
+            (1, 100, "wxid_alive", "Alive", "", 1, 1, 0, 0),  # 保留
+            (2, 100, "wxid_recall", "Recalled", "撤回的评论", 2, 2, 0, 1),  # 过滤
+            (1, 100, "wxid_alsoalive", "AlsoAlive", "", 3, 3, 0, 0),  # 保留
+        ]
+        # _make_sns_db 当前签名只填 8 列, 这里直接手写包含 del_status 的插入
+        import sqlite3, tempfile
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        c = sqlite3.connect(path)
+        try:
+            c.execute(
+                "CREATE TABLE SnsMessage_tmp3 ("
+                "  local_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  type INTEGER, feed_id INTEGER,"
+                "  from_username TEXT, from_nickname TEXT,"
+                "  content TEXT, create_time INTEGER,"
+                "  comment_id INTEGER, comment64_id INTEGER,"
+                "  del_status INTEGER)"
+            )
+            c.executemany(
+                "INSERT INTO SnsMessage_tmp3 (type, feed_id, from_username, "
+                "from_nickname, content, create_time, comment_id, comment64_id, "
+                "del_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                interactions,
+            )
+            c.commit()
+        finally:
+            c.close()
+        try:
+            ix = query_interactions(path)
+            self.assertEqual(len(ix[100]["likes"]), 2)  # 软删的 comment 不算
+            self.assertEqual(len(ix[100]["comments"]), 0)
+        finally:
+            Path(path).unlink(missing_ok=True)
 
     def test_missing_table_returns_empty(self):
         # 老版本 sns.db 可能没 SnsMessage_tmp3
@@ -363,6 +402,23 @@ class TestQueryInteractions(unittest.TestCase):
 
 class TestQuerySnsWithInteractions(unittest.TestCase):
     """query_sns 把 likes/comments 注入到 post dict。"""
+
+    def test_with_interactions_false_skips_query(self):
+        # `with_interactions=False` 应该完全跳过 SnsMessage_tmp3 查询;
+        # 即便 likes/comments 在 db 里存在, post dict 也只看到空数组
+        db = _make_sns_db(
+            [(1, "fake_user_xyz", _XML_IMAGE_POST)],
+            interactions=[(1, 1, "wxid_a", "A", "", 1, 1, 0)],
+        )
+        try:
+            posts = query_sns(db, user="fake_user_xyz",
+                              start_ts=0, end_ts=0, include_cover=False,
+                              limit=None, with_interactions=False)
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(posts[0]["likes"], [])
+            self.assertEqual(posts[0]["comments"], [])
+        finally:
+            Path(db).unlink(missing_ok=True)
 
     def test_post_carries_likes_and_comments(self):
         db = _make_sns_db(

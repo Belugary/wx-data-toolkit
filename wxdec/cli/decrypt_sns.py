@@ -364,31 +364,29 @@ def query_interactions(
       type=1 -> 点赞: content 通常为空, 互动方在 from_username/from_nickname/create_time
       type=2 -> 评论: content 是评论文本; 其余同上, 加 comment_id 用于回复关系
 
+    `del_status != 0` 表示对方撤回该互动 — 微信本地不真删, 我们这里过滤掉。
     SnsMessage_tmp3 表对 self 帖子专用 (to_username = self), 不区分别人帖子的互动。
     `post_tids` 给定时仅 IN 过滤; 否则全表读 (sns.db 通常 < 10K 行)。
 
     返回: {feed_id: {"likes": [...], "comments": [...]}}
-    每个 like / comment dict 字段: from / nickname / time(int) / timeIso(str)。
+    每个 like / comment dict 字段:
+      fromUsername / fromNickname / createTime(int) / createTimeIso(str)。
     评论额外有 content / commentId / commentId64。
     """
+    base_select = (
+        "SELECT type, feed_id, from_username, from_nickname, content, "
+        "create_time, comment_id, comment64_id FROM SnsMessage_tmp3 "
+        "WHERE COALESCE(del_status, 0) = 0"
+    )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         if post_tids:
             placeholders = ",".join("?" for _ in post_tids)
-            sql = (
-                "SELECT type, feed_id, from_username, from_nickname, content, "
-                "create_time, comment_id, comment64_id "
-                f"FROM SnsMessage_tmp3 WHERE feed_id IN ({placeholders}) "
-                "ORDER BY create_time"
-            )
+            sql = f"{base_select} AND feed_id IN ({placeholders}) ORDER BY create_time"
             params: list[Any] = list(post_tids)
         else:
-            sql = (
-                "SELECT type, feed_id, from_username, from_nickname, content, "
-                "create_time, comment_id, comment64_id "
-                "FROM SnsMessage_tmp3 ORDER BY create_time"
-            )
+            sql = f"{base_select} ORDER BY create_time"
             params = []
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
@@ -407,10 +405,10 @@ def query_interactions(
             if ct else ""
         )
         base = {
-            "from": r["from_username"] or "",
-            "nickname": r["from_nickname"] or "",
-            "time": ct,
-            "timeIso": ct_iso,
+            "fromUsername": r["from_username"] or "",
+            "fromNickname": r["from_nickname"] or "",
+            "createTime": ct,
+            "createTimeIso": ct_iso,
         }
         if r["type"] == 1:  # like
             bucket["likes"].append(base)
@@ -433,11 +431,13 @@ def query_sns(
     end_ts: int,
     include_cover: bool,
     limit: Optional[int],
+    with_interactions: bool = True,
 ) -> list[dict[str, Any]]:
     """从 sns.db 拉数据 + 按 wxid 过滤(SQL) + 按日期过滤(parsed XML)。
 
     日期过滤必须在 XML 解析之后做, 因为 createTime 不在 SQL 列里。
-    互动 (likes/comments) 来自 SnsMessage_tmp3, 按 tid 关联。
+    互动 (likes/comments) 来自 SnsMessage_tmp3, 按 tid 关联;
+    `with_interactions=False` 时跳过该步, 加快只看正文的查询。
     """
     sql = "SELECT tid, user_name, content FROM SnsTimeLine"
     params: list[Any] = []
@@ -453,7 +453,7 @@ def query_sns(
     finally:
         conn.close()
 
-    interactions = query_interactions(db_path)
+    interactions = query_interactions(db_path) if with_interactions else {}
 
     posts: list[dict[str, Any]] = []
     for r in rows:
@@ -623,13 +623,14 @@ def _download_and_decrypt_one(
     timeout: int = _DEFAULT_TIMEOUT,
     max_size: int = _DEFAULT_MAX_BYTES,
 ) -> tuple[Optional[str], str]:
-    """下载一张 SNS 图、用 ISAAC-64 keystream XOR 解密、落盘 <out_dir>/<md5>.<ext>。
+    """下载一张 SNS 图、用 ISAAC-64 keystream XOR 解密、落盘 <out_dir>/<stem>.<ext>。
 
-    命名取 urlAttrs.md5(每张图独立, 全局去重); key 是同一帖子内多张图共享的
-    ISAAC seed, 不能用于命名。同一张图被多次发送 → md5 一致 → 只存一份。
+    命名优先取 urlAttrs.md5(每张图独立, 全局去重); md5 缺失 (常见于公众号封面) 时
+    回退到 key 命名。key 是同一帖子内多张图共享的 ISAAC seed, 通常公众号封面只 1
+    张/帖, 兜底命名不会撞。
 
-    幂等: out_dir 下已有 <md5>.* 时直接返回该路径(状态 "skip-existing")。
-    安全: 写 <md5>.<ext>.part, 解密 + magic 校验通过后 rename, 失败不污染目标。
+    幂等: out_dir 下已有 <stem>.* 时直接返回该路径(状态 "skip-existing")。
+    安全: 写 <stem>.<ext>.part, 解密 + magic 校验通过后 rename, 失败不污染目标。
 
     Returns (saved_path_or_none, status_string)。状态字符串前缀:
       ok / skip-* / error-*
@@ -638,11 +639,12 @@ def _download_and_decrypt_one(
         return None, "skip-no-url"
     if not key or str(key) in ("0", ""):
         return None, "skip-no-key"
-    if not md5:
-        return None, "skip-no-md5"
 
-    # idempotency: any existing <md5>.* counts as "already done".
-    existing = glob.glob(os.path.join(out_dir, f"{md5}.*"))
+    # 命名 stem: md5 优先, 缺失退到 key
+    stem = md5 or key
+
+    # idempotency: any existing <stem>.* counts as "already done".
+    existing = glob.glob(os.path.join(out_dir, f"{stem}.*"))
     existing = [p for p in existing if not p.endswith(".part")]
     if existing:
         return existing[0], "skip-existing"
@@ -685,7 +687,7 @@ def _download_and_decrypt_one(
         return None, "error-bad-magic"
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{md5}.{ext}")
+    out_path = os.path.join(out_dir, f"{stem}.{ext}")
     tmp_path = out_path + ".part"
     with open(tmp_path, "wb") as f:
         f.write(data)
@@ -764,12 +766,16 @@ def _download_video_one(
 def decrypt_media_for_posts(posts: list, out_dir: str) -> dict:
     """按帖子遍历 media 项, 下载 + 还原 + 落盘, mutate `media` dict 加 `localPath`。
 
-    支持: 图片(media.type ∈ {1, 2})+ 视频(media.type == 6)。
-    视频用 post 级别的 <enc key="..."/> 作为 ISAAC seed; 图片用 media url.key。
+    路径选择不再依赖 `media.type` 白名单, 改用"加密参数完整性"作为充分条件:
+      - 视频(type=6): 走 _download_video_one (post 级 <enc key>, 内存还原 ftyp 校验)
+      - 其它任意 type 但 urlAttrs 含非零 key + 非空 token: 走 _download_and_decrypt_one
+        (覆盖 type=2 普通图片 + type=0 公众号封面 mmbiz.qpic.cn 等)
+
+    md5 缺失允许(公众号封面常见此情况), 落盘使用 key 兜底命名。
 
     out_dir 下产物:
-      - 图片 <md5>.<jpg|png|gif|webp|bmp>(全局去重 by md5)
-      - 视频 <videomd5>.mp4(同样按 videomd5 全局去重)
+      - 图片 <md5 或 key>.<jpg|png|gif|webp|bmp>(同图 md5 一致, 全局去重)
+      - 视频 <videomd5>.mp4(按 videomd5 全局去重)
     """
     counts: dict[str, int] = {}
     saved = errors = total = 0
@@ -781,16 +787,16 @@ def decrypt_media_for_posts(posts: list, out_dir: str) -> dict:
             attrs = m.get("urlAttrs", {}) or {}
             url = m.get("url") or ""
             token = str(attrs.get("token", ""))
+            key = str(attrs.get("key", ""))
+            md5 = str(attrs.get("md5", ""))
 
-            if mtype in (1, 2):
-                key = str(attrs.get("key", ""))
-                md5 = str(attrs.get("md5", ""))
+            if mtype == 6:
+                vmd5 = str(attrs.get("videomd5", "") or md5)
+                total += 1
+                saved_path, status = _download_video_one(url, token, post_video_key, vmd5, out_dir)
+            elif key and key != "0" and token:
                 total += 1
                 saved_path, status = _download_and_decrypt_one(url, token, key, md5, out_dir)
-            elif mtype == 6:
-                md5 = str(attrs.get("videomd5", "") or attrs.get("md5", ""))
-                total += 1
-                saved_path, status = _download_video_one(url, token, post_video_key, md5, out_dir)
             else:
                 continue
 
