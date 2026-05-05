@@ -221,36 +221,56 @@ def detect_mp4(buf: bytes) -> bool:
     return len(buf) >= 8 and buf[4:8] == b"ftyp"
 
 
-def decrypt_video_in_place(path: Path, key: str) -> bool:
-    """视频前 128KB XOR 后回写; 返回是否成功(以 ftyp 校验)。
+def decrypt_video_bytes(payload: bytes, key: str) -> Optional[bytes]:
+    """前 SNS_VIDEO_HEAD_SIZE 字节 XOR; ftyp 校验通过返回完整明文, 否则 None。
 
-    安全保证: 解密在内存 buffer 中完成, **校验 ftyp 通过才回写**。
-    seed 错误 / 文件损坏时不动原文件, 调用方可放心重试。
+    与 decrypt_image_bytes 的差异: 视频只 XOR 前 128KB, 余下原样; 且必须 ftyp 校验
+    通过才接受输出。校验失败一律返回 None — 包括三种情况, 调用方需用 detect_mp4
+    检查 payload 头自行区分:
+      - seed 错(payload 是密文但 key 不对)
+      - 已经是明文(payload 起手就是 ftyp; 不重复 XOR)
+      - 文件损坏 / 截断
     """
     if not str(key or "").strip():
-        return False
-    size = path.stat().st_size
-    if size <= 8:
-        return False
+        return None
+    if not payload or len(payload) < 8:
+        return None
+    if detect_mp4(payload[:8]):
+        return None  # already plaintext; caller can detect this via detect_mp4 itself
 
-    n = min(SNS_VIDEO_HEAD_SIZE, size)
-    with path.open("rb") as f:
-        head_check = f.read(8)
-        if detect_mp4(head_check):
-            return False  # 已经是明文, 不重复 XOR
-        f.seek(0)
-        head = bytearray(f.read(n))
-
+    n = min(SNS_VIDEO_HEAD_SIZE, len(payload))
+    head = bytearray(payload[:n])
     ks = Isaac64(key).generate_keystream(n)
     for i in range(n):
         head[i] ^= ks[i]
 
-    # 在 buffer 里校验, 通过才回写。失败时原文件保持不变。
     if not detect_mp4(bytes(head[:8])):
+        return None
+
+    return bytes(head) + payload[n:]
+
+
+def decrypt_video_in_place(path: Path, key: str) -> bool:
+    """读 path -> 内存解密 -> ftyp 校验通过才回写; 失败时原文件保持不变。
+
+    薄壳: 实际解密由 decrypt_video_bytes 完成, 这里仅负责 IO。
+    seed 错 / 已是明文 / 文件损坏 都返回 False。
+    """
+    if not str(key or "").strip():
+        return False
+    if path.stat().st_size <= 8:
         return False
 
+    with path.open("rb") as f:
+        payload = f.read()
+
+    plain = decrypt_video_bytes(payload, key)
+    if plain is None:
+        return False
+
+    # 大小不变(只 XOR 前 128KB, 余下原样)— 用 r+b 覆写, 不需 truncate。
     with path.open("r+b") as f:
-        f.write(bytes(head))
+        f.write(plain)
         f.flush()
     return True
 

@@ -54,6 +54,42 @@ _INVALID_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _CDATA_BLOCK_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
 _BARE_AMP_RE = re.compile(r"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
 
+# 老版本微信 (2013-2017) 在 contentDesc / title / description / content / nickname
+# 等纯文本节点内允许用户输入字面量 < > (颜文字 "<o>_<o"、书名号 "<杞菊雪梨饮>"
+# 等), 没做 XML escape, 导致 ET 把这些当未闭合标签 -> "mismatched tag" 或
+# "not well-formed (invalid token)"。我们识别这些已知 text-only 节点的内部,
+# 把里面的 raw < > 转义掉。其余位置保持不变, 不影响合法 XML 路径。
+_TEXT_ONLY_NODES = ("content", "title", "description", "nickname",
+                    "contentDesc", "appname", "sourceName", "sourcename",
+                    "poiName", "displayName", "feeddesc")
+_TEXT_NODE_RE = re.compile(
+    r"(<(" + "|".join(_TEXT_ONLY_NODES) + r")\b[^>]*>)(.*?)(</\2>)",
+    re.DOTALL,
+)
+
+
+def _escape_lt_gt_in_text_nodes(xml_text: str) -> str:
+    """对 _TEXT_ONLY_NODES 列举的元素内部, 把 raw < > 转成 &lt; &gt;。
+
+    & 已由调用方先做过 _BARE_AMP_RE 处理, 这里不再 escape & (避免破坏已正确
+    转义的 &amp;)。
+    """
+    def repl(m: re.Match) -> str:
+        open_tag, _, text, close_tag = m.group(1), m.group(2), m.group(3), m.group(4)
+        text = text.replace("<", "&lt;").replace(">", "&gt;")
+        return open_tag + text + close_tag
+
+    return _TEXT_NODE_RE.sub(repl, xml_text)
+
+
+_RE_CREATE_TIME = re.compile(r"<createTime>(\d+)</createTime>")
+_RE_CONTENT_DESC = re.compile(r"<contentDesc>(.*?)</contentDesc>", re.DOTALL)
+_RE_USERNAME = re.compile(r"<username>([^<]+)</username>")
+_RE_TITLE = re.compile(r"<title>(.*?)</title>", re.DOTALL)
+_RE_CONTENT_URL = re.compile(r"<contentUrl>([^<]*)</contentUrl>")
+_RE_PRIVATE = re.compile(r"<private>(\d+)</private>")
+_RE_CONTENT_STYLE = re.compile(r"<contentStyle>(\d+)</contentStyle>")
+
 
 def _try_zstd_decompress(raw: bytes) -> bytes:
     """若 raw 以 zstd magic 开头, 返回解压结果; 否则原样返回。
@@ -116,7 +152,12 @@ def _decode_blob_to_xml(value: Any) -> str:
 def _sanitize_xml(xml_text: str) -> str:
     """修复微信"伪 XML": URL 里 bare & 没转义会让 ElementTree 炸。
 
-    策略: 保留 CDATA 块原样, 只对 CDATA 之外的 bare & 转成 &amp;。
+    策略:
+      1. 去除非法控制字符
+      2. 保留 CDATA 块原样, 对 CDATA 外 bare & 转成 &amp;
+      3. 老版本(2013-2017)用户在 content/title 等纯文本字段里写过 raw < > 字符
+         (颜文字 "<o>_<o"、书名号 "<杞菊雪梨饮>"), 在这些已知 text-only 节点
+         内部把 < > 转义。
     """
     s = _INVALID_CTRL_RE.sub("", xml_text)
 
@@ -128,7 +169,67 @@ def _sanitize_xml(xml_text: str) -> str:
         parts.append(m.group(0))
         last = m.end()
     parts.append(_BARE_AMP_RE.sub("&amp;", s[last:]))
-    return "".join(parts)
+    out = "".join(parts)
+    out = _escape_lt_gt_in_text_nodes(out)
+    return out
+
+
+def _regex_fallback_extract(xml_text: str, fallback_username: str) -> dict[str, Any]:
+    """ET 解析仍失败时的最后一搏 — regex 抢救最有价值的字段。
+
+    返回: 部分填充的 parse 结果 dict; _parseError 仍标记, 让调用方知道
+    这条不是结构化解析, 可能字段不全。
+
+    抢救范围: createTime / contentDesc / username / type / title / contentUrl
+    / isPrivate / location attributes。媒体列表不抢救(结构嵌套,正则不可靠)。
+    """
+    out: dict[str, Any] = {
+        "username": fallback_username,
+        "createTime": 0,
+        "contentDesc": "",
+        "location": "",
+        "locationDetail": {},
+        "sourceName": "",
+        "type": 0,
+        "title": "",
+        "contentUrl": "",
+        "media": [],
+        "videoEncKey": "",
+        "isPrivate": False,
+        "finderFeed": {},
+        "_parseError": "regex-fallback (XML malformed)",
+    }
+    if not xml_text:
+        return out
+
+    if (m := _RE_CREATE_TIME.search(xml_text)):
+        out["createTime"] = int(m.group(1))
+    if (m := _RE_CONTENT_DESC.search(xml_text)):
+        # contentDesc 内可能有 raw < >, 反 unescape
+        text = m.group(1).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        out["contentDesc"] = text.strip()
+    if (m := _RE_USERNAME.search(xml_text)):
+        out["username"] = m.group(1).strip() or fallback_username
+    if (m := _RE_CONTENT_STYLE.search(xml_text)):
+        out["type"] = int(m.group(1))
+    if (m := _RE_TITLE.search(xml_text)):
+        out["title"] = m.group(1).replace("&lt;", "<").replace("&gt;", ">").strip()
+    if (m := _RE_CONTENT_URL.search(xml_text)):
+        out["contentUrl"] = m.group(1).strip()
+    if (m := _RE_PRIVATE.search(xml_text)):
+        out["isPrivate"] = m.group(1) == "1"
+    # location 是 attribute, regex 直接抓 <location ...> 整段
+    if (m := re.search(r"<location\b([^/>]*)/?>", xml_text)):
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+        out["locationDetail"] = {
+            k: v for k, v in attrs.items()
+            if v and v not in ("0", "0.0", "0.000000")
+        }
+        out["location"] = (
+            attrs.get("poiName") or attrs.get("poiAddressName")
+            or attrs.get("city") or ""
+        ).strip()
+    return out
 
 
 def _safe_int(v: Any) -> int:
@@ -155,12 +256,26 @@ def parse_timeline_xml(xml_text: str, fallback_username: str = "") -> dict[str, 
         "username": fallback_username,
         "createTime": 0,
         "contentDesc": "",
+        # 兼容字段: poiName 优先, 否则空。完整位置信息在 locationDetail。
         "location": "",
+        # 完整位置: poiName / poiAddress / poiAddressName / city / country
+        # / latitude / longitude / poiClassifyId / poiScale。空字典 = 该帖无位置。
+        "locationDetail": {},
         "sourceName": "",
         "type": 0,
         "title": "",
         "contentUrl": "",
         "media": [],
+        # 视频(media.type=6)的 ISAAC seed: 来自 <enc key="..."/> 而不是 <url key="0"/>。
+        # 通常 post 级别 + 各 media 内重复, 这里取最近一个。WeFlow extractVideoKey 同源。
+        "videoEncKey": "",
+        # 私密帖(只自己可见)
+        "isPrivate": False,
+        # 视频号转发: ContentObject 内 <finderFeed> 节点。空字典 = 非视频号转发。
+        # 字段: objectId / username / nickname / desc / feedType / mediaCount /
+        # media[] (mediaType / url / thumbUrl / coverUrl / width / height / videoPlayDuration)。
+        # url 是视频号 CDN, 协议不同于朋友圈媒体, 本项目不解密只采集 metadata。
+        "finderFeed": {},
     }
 
     if not xml_text.strip():
@@ -169,8 +284,11 @@ def parse_timeline_xml(xml_text: str, fallback_username: str = "") -> dict[str, 
     try:
         root = ET.fromstring(_sanitize_xml(xml_text))
     except ET.ParseError as e:
-        out["_parseError"] = f"{e}"
-        return out
+        # 老版本 (~2013-2017) 微信 XML 偶有 ET 即便 sanitize 后也解不了的形态。
+        # 走 regex fallback, 抢救 createTime / contentDesc 等关键字段。
+        recovered = _regex_fallback_extract(xml_text, fallback_username)
+        recovered["_parseError"] = f"{e}"
+        return recovered
 
     # 规范化到 TimelineObject 节点: ET 的 .// 不匹配 root 自身, 所以两种结构都得兼容
     tl = root if root.tag == "TimelineObject" else root.find(".//TimelineObject")
@@ -181,7 +299,24 @@ def parse_timeline_xml(xml_text: str, fallback_username: str = "") -> dict[str, 
     out["username"] = _findtext(tl, "username") or fallback_username
     out["createTime"] = _safe_int(_findtext(tl, "createTime"))
     out["contentDesc"] = _findtext(tl, "contentDesc")
-    out["location"] = _findtext(tl, ".//location/poiName") or _findtext(tl, ".//location")
+
+    # location: 微信存的是 attribute 而不是 child element。之前用 _findtext 永远抓空。
+    # poiName / poiAddress 等只有用户主动选择 poi 时填充; 仅经纬度发的帖子只有 lat/lon/city。
+    loc_el = tl.find(".//location")
+    if loc_el is not None:
+        loc_attrs = dict(loc_el.attrib)
+        # 过滤无意义零值, 只保留实际填充的字段
+        out["locationDetail"] = {
+            k: v for k, v in loc_attrs.items()
+            if v and v not in ("0", "0.0", "0.000000")
+        }
+        # 兼容字段: poiName 最具可读性, 没有就退化到 city, 都没有就空字符串
+        out["location"] = (
+            loc_attrs.get("poiName")
+            or loc_attrs.get("poiAddressName")
+            or loc_attrs.get("city")
+            or ""
+        ).strip()
 
     for tag in ("appname", "sourceName", "sourcename"):
         v = _findtext(tl, f".//{tag}")
@@ -193,18 +328,65 @@ def parse_timeline_xml(xml_text: str, fallback_username: str = "") -> dict[str, 
                             or _findtext(tl, ".//ContentObject/type"))
     out["title"] = _findtext(tl, ".//ContentObject/title")
     out["contentUrl"] = _findtext(tl, ".//ContentObject/contentUrl")
+    out["isPrivate"] = _findtext(tl, ".//private") == "1"
+
+    # 视频号转发: <ContentObject>/<finderFeed>。url 是视频号 CDN, 不解密只采集 metadata。
+    finder_el = tl.find(".//ContentObject/finderFeed")
+    if finder_el is not None:
+        finder_media = []
+        for fm in finder_el.findall(".//mediaList/media"):
+            finder_media.append({
+                "mediaType": _safe_int(_findtext(fm, "mediaType")),
+                "url": _findtext(fm, "url"),
+                "thumbUrl": _findtext(fm, "thumbUrl"),
+                "coverUrl": _findtext(fm, "coverUrl"),
+                "fullCoverUrl": _findtext(fm, "fullCoverUrl"),
+                "width": _safe_int(_findtext(fm, "width")),
+                "height": _safe_int(_findtext(fm, "height")),
+                "videoPlayDuration": _safe_int(_findtext(fm, "videoPlayDuration")),
+            })
+        out["finderFeed"] = {
+            "objectId": _findtext(finder_el, "objectId"),
+            "objectNonceId": _findtext(finder_el, "objectNonceId"),
+            "feedType": _safe_int(_findtext(finder_el, "feedType")),
+            "username": _findtext(finder_el, "username"),
+            "nickname": _findtext(finder_el, "nickname"),
+            "avatar": _findtext(finder_el, "avatar"),
+            "desc": _findtext(finder_el, "desc"),
+            "liveId": _findtext(finder_el, "liveId"),
+            "mediaCount": _safe_int(_findtext(finder_el, "mediaCount")),
+            "media": finder_media,
+        }
+
+    # <enc key="..."/> 同时存在于 ContentObject 顶层 + 各 <media> 内部, 通常一致。
+    # find(".//enc") 取深度优先第一个; 实测 self 数据 post-level 与 per-media 一致, 视频解密
+    # 走 post-level 已被 7/7 实测验证。如未来 multi-video post 出现 per-media 不同的 key,
+    # 改用 m["encKey"] 替代 post["videoEncKey"]。
+    enc_el = tl.find(".//enc")
+    if enc_el is not None:
+        out["videoEncKey"] = (enc_el.attrib.get("key") or "").strip()
 
     media: list[dict[str, Any]] = []
     for m in tl.findall(".//mediaList/media"):
         url_el = m.find("url")
         thumb_el = m.find("thumb")
+        size_el = m.find("size")
+        enc_el_m = m.find("enc")
         media.append({
             "type": _safe_int(_findtext(m, "type")),
             "id": _findtext(m, "id"),
+            "subType": _findtext(m, "sub_type"),
+            "description": _findtext(m, "description"),
             "url": (url_el.text.strip() if url_el is not None and url_el.text else ""),
             "urlAttrs": dict(url_el.attrib) if url_el is not None else {},
             "thumb": (thumb_el.text.strip() if thumb_el is not None and thumb_el.text else ""),
             "thumbAttrs": dict(thumb_el.attrib) if thumb_el is not None else {},
+            # 像素尺寸 + 字节大小; 缺失或为空字典表示该媒体无 size 节点
+            "size": dict(size_el.attrib) if size_el is not None else {},
+            # 视频时长(秒, 文本)。图片帖子也有这个 child 但通常为空。
+            "videoDuration": _findtext(m, "videoDuration"),
+            # per-media 加密 key, 通常与 post-level 一致, 但保留独立路径以防将来发散
+            "encKey": (enc_el_m.attrib.get("key", "") if enc_el_m is not None else "").strip(),
         })
     out["media"] = media
 
@@ -249,6 +431,76 @@ def _parse_date_utc(s: str) -> int:
     return int(dt.timestamp())
 
 
+def query_interactions(
+    db_path: str, post_tids: Optional[list[int]] = None
+) -> dict[int, dict[str, list]]:
+    """从 SnsMessage_tmp3 拉点赞 / 评论, 按 feed_id (= SnsTimeLine.tid) 聚合。
+
+    SnsMessage_tmp3.type 实测语义:
+      type=1 -> 点赞: content 总为空, 实体在 from_username/from_nickname/create_time
+      type=2 -> 评论: content 是评论文本; 其余字段同上 + comment_id 用于回复关系
+
+    SnsMessage_tmp3 表对 self 帖子专用 (to_username = self), 不区分别人帖子的互动。
+    `post_tids` 给定时仅 IN 过滤; 否则全表读 (sns.db 通常 < 10K 行)。
+
+    返回: {feed_id: {"likes": [...], "comments": [...]}}
+    每个 like / comment dict 字段: from / nickname / time(int) / timeIso(str)。
+    评论额外有 content / commentId / commentId64。
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if post_tids:
+            placeholders = ",".join("?" for _ in post_tids)
+            sql = (
+                "SELECT type, feed_id, from_username, from_nickname, content, "
+                "create_time, comment_id, comment64_id "
+                f"FROM SnsMessage_tmp3 WHERE feed_id IN ({placeholders}) "
+                "ORDER BY create_time"
+            )
+            params: list[Any] = list(post_tids)
+        else:
+            sql = (
+                "SELECT type, feed_id, from_username, from_nickname, content, "
+                "create_time, comment_id, comment64_id "
+                "FROM SnsMessage_tmp3 ORDER BY create_time"
+            )
+            params = []
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        # SnsMessage_tmp3 不存在 (老版本 sns.db)。视为零互动而非报错。
+        return {}
+    finally:
+        conn.close()
+
+    out: dict[int, dict[str, list]] = {}
+    for r in rows:
+        feed_id = r["feed_id"]
+        bucket = out.setdefault(feed_id, {"likes": [], "comments": []})
+        ct = r["create_time"] or 0
+        ct_iso = (
+            datetime.fromtimestamp(ct, tz=timezone.utc).isoformat()
+            if ct else ""
+        )
+        base = {
+            "from": r["from_username"] or "",
+            "nickname": r["from_nickname"] or "",
+            "time": ct,
+            "timeIso": ct_iso,
+        }
+        if r["type"] == 1:  # like
+            bucket["likes"].append(base)
+        elif r["type"] == 2:  # comment
+            bucket["comments"].append({
+                **base,
+                "content": r["content"] or "",
+                "commentId": r["comment_id"] or 0,
+                "commentId64": r["comment64_id"] or 0,
+            })
+        # 其它 type 暂时观察, 不入桶
+    return out
+
+
 def query_sns(
     db_path: str,
     *,
@@ -261,6 +513,7 @@ def query_sns(
     """从 sns.db 拉数据 + 按 wxid 过滤(SQL) + 按日期过滤(parsed XML)。
 
     日期过滤必须在 XML 解析之后做, 因为 createTime 不在 SQL 列里。
+    互动 (likes/comments) 来自 SnsMessage_tmp3, 按 tid 关联。
     """
     sql = "SELECT tid, user_name, content FROM SnsTimeLine"
     params: list[Any] = []
@@ -275,6 +528,8 @@ def query_sns(
         rows = conn.execute(sql, params).fetchall()
     finally:
         conn.close()
+
+    interactions = query_interactions(db_path)
 
     posts: list[dict[str, Any]] = []
     for r in rows:
@@ -295,6 +550,7 @@ def query_sns(
         if end_ts and ct and ct >= end_ts:
             continue
 
+        ix = interactions.get(tid, {"likes": [], "comments": []})
         post = {
             "tid": tid,
             "username": parsed["username"] or username,
@@ -305,11 +561,17 @@ def query_sns(
             ),
             "contentDesc": parsed["contentDesc"],
             "location": parsed["location"],
+            "locationDetail": parsed["locationDetail"],
             "sourceName": parsed["sourceName"],
             "type": parsed["type"],
             "title": parsed["title"],
             "contentUrl": parsed["contentUrl"],
             "media": parsed["media"],
+            "videoEncKey": parsed["videoEncKey"],
+            "isPrivate": parsed["isPrivate"],
+            "finderFeed": parsed["finderFeed"],
+            "likes": ix["likes"],
+            "comments": ix["comments"],
         }
         if "_parseError" in parsed:
             post["_parseError"] = parsed["_parseError"]
@@ -369,26 +631,40 @@ def _resolve_self_wxid(db_path: str, candidate: Optional[str]) -> Optional[str]:
 _SNS_UA = "MicroMessenger Client"
 _DEFAULT_TIMEOUT = 30
 _DEFAULT_MAX_BYTES = 20 * 1024 * 1024
+# 视频默认 100MB 上限: 朋友圈视频实测见过 8MB 左右, 给足缓冲避免大视频被截断。
+_DEFAULT_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 
 
-def _fix_sns_url(raw_url: str, token: str) -> str:
+def _fix_sns_url(raw_url: str, token: str, *, is_video: bool = False) -> str:
     """规范化 SNS CDN URL 以便能拿到全图原始字节。
 
-    三件事(来源: chatlog_alpha):
+    图片(默认):
       - http -> https(腾讯 CDN 已强制 TLS)
       - 路径以 /150 结尾(thumb 缩略图, referer-locked)→ 改 /0(全图)
       - query 加 ?token=<token>&idx=1(CDN 签名)
+
+    视频(is_video=True): 不替换 /150 段(视频 URL 路径形态不同), 且 token / idx
+    必须放在 query 最前面 — WeFlow snsService.ts 实测 CDN 对参数顺序敏感。
+
+    来源: chatlog_alpha(图片)+ WeFlow snsService.ts.fixSnsUrl(视频)
     """
     if not raw_url:
         return raw_url
     fixed = raw_url.replace("http://", "https://", 1)
-    if fixed.endswith("/150"):
-        fixed = fixed[:-4] + "/0"
-    elif fixed.endswith("/150/"):
-        fixed = fixed[:-5] + "/0"
+    if not is_video:
+        if fixed.endswith("/150"):
+            fixed = fixed[:-4] + "/0"
+        elif fixed.endswith("/150/"):
+            fixed = fixed[:-5] + "/0"
     if token and "token=" not in fixed:
-        sep = "&" if "?" in fixed else "?"
-        fixed = f"{fixed}{sep}token={token}&idx=1"
+        if is_video:
+            # 视频: token / idx 必须在最前
+            base, _, existing = fixed.partition("?")
+            tail = f"&{existing}" if existing else ""
+            fixed = f"{base}?token={token}&idx=1{tail}"
+        else:
+            sep = "&" if "?" in fixed else "?"
+            fixed = f"{fixed}{sep}token={token}&idx=1"
     return fixed
 
 
@@ -493,27 +769,107 @@ def _download_and_decrypt_one(
     return out_path, "ok"
 
 
-def decrypt_media_for_posts(posts: list, out_dir: str) -> dict:
-    """按帖子遍历 media 项, 下载 + 解密 + 落盘, mutate `media` dict 加 `localPath`。
+def _download_video_one(
+    raw_url: str,
+    token: str,
+    key: str,
+    md5: str,
+    out_dir: str,
+    *,
+    timeout: int = _DEFAULT_TIMEOUT,
+    max_size: int = _DEFAULT_VIDEO_MAX_BYTES,
+) -> tuple[Optional[str], str]:
+    """下载朋友圈视频、用 ISAAC-64 keystream XOR 前 128KB 还原, 落盘 <md5>.mp4。
 
-    只处理图片(media.type == 2; type 6 是视频先跳过, 留给将来 sns_isaac.decrypt_video_in_place)。
+    与图片版本的关键差异:
+      - seed 来自 post 级别的 <enc key="..."/>(图片用 media 级 url.key)
+      - 只 XOR 前 SNS_VIDEO_HEAD_SIZE 字节, 余下原样
+      - 必须 ftyp 校验通过才落盘(seed 错时彻底不写文件)
+      - URL token 必须在 query 最前面(WeFlow 实测)
+
+    幂等: out_dir 下已有 <md5>.mp4 直接 skip-existing。
+    安全: <md5>.mp4.part 临时落盘 → 解密 + ftyp 校验通过 → rename。
+    """
+    if not raw_url:
+        return None, "skip-no-url"
+    if not key or str(key) in ("0", ""):
+        return None, "skip-no-key"
+    if not md5:
+        return None, "skip-no-md5"
+
+    out_path = os.path.join(out_dir, f"{md5}.mp4")
+    if os.path.isfile(out_path):
+        return out_path, "skip-existing"
+
+    fixed_url = _fix_sns_url(raw_url, token, is_video=True)
+    req = urllib.request.Request(
+        fixed_url,
+        headers={"User-Agent": _SNS_UA, "Accept": "*/*", "Connection": "keep-alive"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            cl = resp.headers.get("Content-Length")
+            if cl and int(cl) > max_size:
+                return None, "error-too-big"
+            payload = resp.read(max_size + 1)
+            if len(payload) > max_size:
+                return None, "error-too-big"
+    except urllib.error.HTTPError as e:
+        return None, f"error-http-{e.code}"
+    except urllib.error.URLError:
+        return None, "error-url"
+
+    from wxdec.sns_isaac import decrypt_video_bytes, detect_mp4
+
+    if detect_mp4(payload[:8]):
+        # 服务端罕见地直接给明文(看到 X-Enc 缺失或服务端策略变更), 不重复 XOR
+        plain = payload
+    else:
+        plain = decrypt_video_bytes(payload, key)
+        if plain is None:
+            return None, "error-bad-magic"
+
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_path = out_path + ".part"
+    with open(tmp_path, "wb") as f:
+        f.write(plain)
+    os.replace(tmp_path, out_path)
+    return out_path, "ok"
+
+
+def decrypt_media_for_posts(posts: list, out_dir: str) -> dict:
+    """按帖子遍历 media 项, 下载 + 还原 + 落盘, mutate `media` dict 加 `localPath`。
+
+    支持: 图片(media.type ∈ {1, 2})+ 视频(media.type == 6)。
+    视频用 post 级别的 <enc key="..."/> 作为 ISAAC seed; 图片用 media url.key。
+
+    out_dir 下产物:
+      - 图片 <md5>.<jpg|png|gif|webp|bmp>(全局去重 by md5)
+      - 视频 <videomd5>.mp4(同样按 videomd5 全局去重)
     """
     counts: dict[str, int] = {}
     saved = errors = total = 0
 
     for post in posts:
+        post_video_key = str(post.get("videoEncKey") or "")
         for m in post.get("media", []):
             mtype = m.get("type")
-            if mtype not in (1, 2):
-                continue
-            url = m.get("url") or ""
             attrs = m.get("urlAttrs", {}) or {}
-            key = str(attrs.get("key", ""))
+            url = m.get("url") or ""
             token = str(attrs.get("token", ""))
-            md5 = str(attrs.get("md5", ""))
 
-            total += 1
-            saved_path, status = _download_and_decrypt_one(url, token, key, md5, out_dir)
+            if mtype in (1, 2):
+                key = str(attrs.get("key", ""))
+                md5 = str(attrs.get("md5", ""))
+                total += 1
+                saved_path, status = _download_and_decrypt_one(url, token, key, md5, out_dir)
+            elif mtype == 6:
+                md5 = str(attrs.get("videomd5", "") or attrs.get("md5", ""))
+                total += 1
+                saved_path, status = _download_video_one(url, token, post_video_key, md5, out_dir)
+            else:
+                continue
+
             counts[status] = counts.get(status, 0) + 1
             if saved_path:
                 m["localPath"] = saved_path
@@ -524,7 +880,7 @@ def decrypt_media_for_posts(posts: list, out_dir: str) -> dict:
 
     skipped = total - saved - errors
     print(
-        f"[+] SNS 媒体: 共 {total} 张, 还原 {saved}, 跳过 {skipped}, 失败 {errors}",
+        f"[+] SNS 媒体: 共 {total} 项, 还原 {saved}, 跳过 {skipped}, 失败 {errors}",
         file=sys.stderr,
     )
     if counts:

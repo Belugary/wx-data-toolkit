@@ -47,6 +47,21 @@ sudo ./bin/find_all_keys_macos
 
 **导出朋友圈** — `python -m wxdec.cli.decrypt_sns --start YYYY-MM-DD --decrypt-media` 整理朋友圈到 `sns/` 目录。 注意:**朋友圈的图片/视频在服务端只保留几天**, 过期就拿不到了; 加上 `--decrypt-media` 才会在窗口期内把媒体文件落到本地, 之后就一直可用。
 
+输出 JSON 包含每条朋友圈的完整 metadata: `contentDesc / location / locationDetail / media[] (含 description / videoDuration / size) / videoEncKey / isPrivate / finderFeed (视频号转发) / likes / comments`。 互动数据(点赞、评论)从 sns.db 的 `SnsMessage_tmp3` 表读取。
+
+**朋友圈视频批量补还原** — 下载朋友圈视频时若之前缺失访问凭据, 视频会以 `.mp4.enc` 形式临时落盘。 拿到完整 `sns.db` 后用以下命令批量整理:
+
+```bash
+python tools/decrypt_existing_videos.py --enc-dir <存放 .mp4.enc 的目录> \
+    --sns-db ~/Documents/wechat_decrypted/sns/sns.db
+```
+
+视频访问凭据(post 级别 `<enc key>` 字段)从 sns.db XML 中读取, 不依赖网络。
+
+**朋友圈采集度报告** — `python tools/sns_health.py --user <你的 wxid>` 输出当前 sns.db 里数据的健康度: 月度直方图、字段采集深度、媒体落盘覆盖率、`SnsUserTimeLineBreakFlagV2` 反映的"完整加载锚点"(早于该时间点的数据可能不全)。 报告末尾给出针对性补全建议(例如要补全早期历史, 在微信客户端打开自己朋友圈一直下拉到底, 让客户端向服务器请求历史并写入本地 DB)。
+
+**整理朋友圈本地图片缓存** — `python tools/decode_sns_cache.py` 把微信本地缓存目录(`xwechat_files/<wxid>/cache/<YYYY-MM>/Sns/Img/`)里所有曾经浏览过的朋友圈图片整理为 jpg / png, 按月落到 `<decoded_image_dir>/sns_cache/<YYYY-MM>/<原始 md5>.<ext>`。 即使腾讯 CDN 已经过期、`--decrypt-media` 拿不到的早期媒体, 只要曾经浏览过就能从本地找回来。 多进程并行, 6000+ 文件几分钟跑完。
+
 **每日定时同步** — `python -m wxdec.cli.daily_sync` 一次跑完"导出 + 整理图片 + 最近 7 天朋友圈", 配 launchd / systemd / schtasks 当定时任务用。
 
 **实时消息流(本地 Web)** — `python main.py` 启动 `http://localhost:5678`, 浏览器里看新消息推送, 图片内联预览, 大约 100 毫秒延迟。
@@ -150,5 +165,5 @@ macOS:
 ## 致谢
 
 - [nobiyou/wx_channel](https://github.com/nobiyou/wx_channel)(MIT) — 朋友圈媒体处理算法的 Go 参考实现, 本仓库 [wxdec/sns_isaac.py](wxdec/sns_isaac.py) 据此 clean-room 移植到 Python
-- [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow) — macOS 上图片读取流程的参考实现
+- [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow) — macOS 图片读取流程、朋友圈视频访问凭据字段位置的参考实现
 - 依赖的开源 Python 库、Anthropic 的 Model Context Protocol

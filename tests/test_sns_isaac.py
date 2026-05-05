@@ -21,6 +21,7 @@ from wxdec.sns_isaac import (
     Isaac64,
     SNS_VIDEO_HEAD_SIZE,
     decrypt_image_bytes,
+    decrypt_video_bytes,
     decrypt_video_in_place,
     detect_image_kind,
     detect_mp4,
@@ -141,6 +142,47 @@ class TestImageDecrypt(unittest.TestCase):
         self.assertEqual(detect_image_kind(b"\xff\xd8\xff\xe0xxxx"), "jpeg")
         self.assertEqual(detect_image_kind(b"\x89PNG\r\n\x1a\nxxx"), "png")
         self.assertIsNone(detect_image_kind(b"random bytes"))
+
+
+class TestDecryptVideoBytes(unittest.TestCase):
+    """decrypt_video_bytes: 内存版视频还原, 给下载流程用(.part rename 模式)。"""
+
+    def _make_ciphertext(self, seed: str, head_size: int, tail_size: int) -> bytes:
+        """构造一段 "前 head_size 加密 / 余下原样" 的视频字节流。"""
+        # 前 head_size 字节的明文必须含 ftyp
+        plain_head = (b"\x00\x00\x00\x1cftypisom" + os.urandom(max(0, head_size - 12)))[:head_size]
+        plain_tail = os.urandom(tail_size)
+        ks = Isaac64(seed).generate_keystream(head_size)
+        enc_head = bytes(p ^ k for p, k in zip(plain_head, ks))
+        return enc_head + plain_tail, plain_head + plain_tail
+
+    def test_correct_seed_returns_full_plaintext(self):
+        cipher, plain = self._make_ciphertext("12345", SNS_VIDEO_HEAD_SIZE, 5000)
+        out = decrypt_video_bytes(cipher, "12345")
+        self.assertEqual(out, plain)
+
+    def test_wrong_seed_returns_none(self):
+        cipher, _ = self._make_ciphertext("12345", SNS_VIDEO_HEAD_SIZE, 100)
+        self.assertIsNone(decrypt_video_bytes(cipher, "99999"))
+
+    def test_empty_key_returns_none(self):
+        self.assertIsNone(decrypt_video_bytes(b"any", ""))
+        self.assertIsNone(decrypt_video_bytes(b"any", "  "))
+
+    def test_already_plaintext_returns_none(self):
+        # 调用方应该 detect_mp4 自查; decrypt_video_bytes 拒绝重复 XOR
+        plain = b"\x00\x00\x00\x1cftypisom" + b"\x00" * 100
+        self.assertIsNone(decrypt_video_bytes(plain, "anyseed"))
+
+    def test_short_payload_returns_none(self):
+        self.assertIsNone(decrypt_video_bytes(b"", "123"))
+        self.assertIsNone(decrypt_video_bytes(b"short", "123"))
+
+    def test_short_video_below_head_size(self):
+        # 视频比 128KB 还小: 整个文件加密, 仍应能还原
+        cipher, plain = self._make_ciphertext("777", 50000, 0)
+        out = decrypt_video_bytes(cipher, "777")
+        self.assertEqual(out, plain)
 
 
 class TestVideoSafety(unittest.TestCase):
