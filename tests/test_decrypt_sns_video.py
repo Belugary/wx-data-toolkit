@@ -290,7 +290,7 @@ class TestLocationCapture(unittest.TestCase):
 
 
 class TestMediaMetadataCapture(unittest.TestCase):
-    """size / videoDuration / description / per-media encKey 全部抓取。"""
+    """size / videoDuration / description 全部抓取。"""
 
     def test_video_media_metadata(self):
         out = parse_timeline_xml(_XML_VIDEO_POST)
@@ -301,7 +301,6 @@ class TestMediaMetadataCapture(unittest.TestCase):
         self.assertEqual(m["size"]["width"], "1080")
         self.assertEqual(m["size"]["height"], "1920")
         self.assertEqual(m["size"]["totalSize"], "8388608")
-        self.assertEqual(m["encKey"], "2105122989")
 
     def test_image_media_metadata_missing_optional(self):
         out = parse_timeline_xml(_XML_IMAGE_POST)
@@ -310,7 +309,6 @@ class TestMediaMetadataCapture(unittest.TestCase):
         self.assertEqual(m["videoDuration"], "")
         self.assertEqual(m["description"], "")
         self.assertEqual(m["size"], {})
-        self.assertEqual(m["encKey"], "")
 
 
 class TestQueryInteractions(unittest.TestCase):
@@ -452,57 +450,43 @@ class TestEarlyEraXmlRescue(unittest.TestCase):
     """
 
     def test_title_with_raw_brackets_parses(self):
+        # 老版本微信用户在 title 写过带尖括号的字面文本 (书名号 / 颜文字), 没转义
         xml = (
             "<TimelineObject><id>1</id><username>x</username>"
             "<createTime>1400000000</createTime>"
             "<ContentObject>"
             "<contentStyle>3</contentStyle>"
-            "<title>[蜜集1]小野大电影——<杞菊雪梨饮></title>"
+            "<title>book review: <Title With Brackets></title>"
             "<contentUrl>https://x</contentUrl>"
             "<mediaList/>"
             "</ContentObject></TimelineObject>"
         )
         out = parse_timeline_xml(xml)
         self.assertNotIn("_parseError", out)
-        self.assertIn("杞菊雪梨饮", out["title"])
+        self.assertIn("Title With Brackets", out["title"])
         self.assertEqual(out["createTime"], 1400000000)
 
     def test_content_with_emoticon_brackets(self):
-        # 即使 contentDesc 没有, content 在嵌入文本里也常见
+        # 颜文字在 contentDesc 里也常见
         xml = (
             "<TimelineObject><id>2</id><username>x</username>"
             "<createTime>1400000100</createTime>"
-            "<contentDesc>呸!装嫩，不要脸!o>_<o</contentDesc>"
+            "<contentDesc>hi <o>_<o smile</contentDesc>"
             "<ContentObject><contentStyle>1</contentStyle><mediaList/></ContentObject>"
             "</TimelineObject>"
         )
         out = parse_timeline_xml(xml)
         self.assertNotIn("_parseError", out)
-        self.assertEqual(out["contentDesc"], "呸!装嫩，不要脸!o>_<o")
+        self.assertEqual(out["contentDesc"], "hi <o>_<o smile")
 
-    def test_regex_fallback_when_xml_irreparable(self):
-        # 故意构造一个 sanitize 也救不回来的 (顶层结构断了)
+    def test_irreparable_xml_returns_parse_error(self):
+        # sanitize 也救不回来的: out 保留默认空字段 + _parseError 标记
         broken = "<not-closed-root><createTime>1400000200</createTime>"
         out = parse_timeline_xml(broken)
         self.assertIn("_parseError", out)
-        # fallback 仍然抢救出 createTime
-        self.assertEqual(out["createTime"], 1400000200)
-
-    def test_fallback_extracts_isPrivate_and_location(self):
-        broken = (
-            "<broken><createTime>1500000000</createTime>"
-            "<contentDesc>hello</contentDesc>"
-            "<private>1</private>"
-            '<location latitude="31.230000" longitude="121.470000" '
-            'city="Shanghai" poiName="POI X" />'
-        )
-        out = parse_timeline_xml(broken)
-        self.assertIn("_parseError", out)
-        self.assertEqual(out["createTime"], 1500000000)
-        self.assertEqual(out["contentDesc"], "hello")
-        self.assertTrue(out["isPrivate"])
-        self.assertEqual(out["location"], "POI X")
-        self.assertEqual(out["locationDetail"]["city"], "Shanghai")
+        # 默认值不变 (没有自动 regex 抢救)
+        self.assertEqual(out["createTime"], 0)
+        self.assertEqual(out["contentDesc"], "")
 
 
 if __name__ == "__main__":

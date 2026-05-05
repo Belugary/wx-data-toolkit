@@ -60,7 +60,7 @@ python tools/decrypt_existing_videos.py --enc-dir <存放 .mp4.enc 的目录> \
 
 **朋友圈采集度报告** — `python tools/sns_health.py --user <你的 wxid>` 输出当前 sns.db 里数据的健康度: 月度直方图、字段采集深度、媒体落盘覆盖率、`SnsUserTimeLineBreakFlagV2` 反映的"完整加载锚点"(早于该时间点的数据可能不全)。 报告末尾给出针对性补全建议(例如要补全早期历史, 在微信客户端打开自己朋友圈一直下拉到底, 让客户端向服务器请求历史并写入本地 DB)。
 
-**整理朋友圈本地图片缓存** — `python tools/decode_sns_cache.py` 把微信本地缓存目录(`xwechat_files/<wxid>/cache/<YYYY-MM>/Sns/Img/`)里所有曾经浏览过的朋友圈图片整理为 jpg / png, 按月落到 `<decoded_image_dir>/sns_cache/<YYYY-MM>/<原始 md5>.<ext>`。 即使腾讯 CDN 已经过期、`--decrypt-media` 拿不到的早期媒体, 只要曾经浏览过就能从本地找回来。 多进程并行, 6000+ 文件几分钟跑完。
+**整理朋友圈本地图片缓存** — `python tools/decode_sns_cache.py` 把微信本地缓存目录(`xwechat_files/<wxid>/cache/<YYYY-MM>/Sns/Img/`)里所有曾经浏览过的朋友圈图片整理为 jpg / png, 按月落到 `<decoded_image_dir>/sns_cache/<YYYY-MM>/<原始 md5>.<ext>`。 即使腾讯 CDN 已经过期、`--decrypt-media` 拿不到的早期媒体, 只要曾经浏览过就能从本地找回来。 默认多进程并行。
 
 **每日定时同步** — `python -m wxdec.cli.daily_sync` 一次跑完"导出 + 整理图片 + 最近 7 天朋友圈", 配 launchd / systemd / schtasks 当定时任务用。
 

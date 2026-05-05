@@ -350,7 +350,7 @@ def analyze(db_path: str, user: Optional[str], image_dir: Optional[str],
               f"`python main.py decrypt-sns --decrypt-media`")
     if vid_total - vid_done > 0:
         print(f"  ► 还有 {vid_total - vid_done} 段视频未还原: "
-              f"`python main.py decrypt-sns --decrypt-media`(视频路径目前是 hardcoded /tmp)")
+              f"`python main.py decrypt-sns --decrypt-media`")
 
     return 0
 
@@ -363,8 +363,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--db", help="path to exported sns.db (default: from config.json)")
     p.add_argument("--user", help="user_name to scope (default: auto-detect from path)")
     p.add_argument("--image-dir", help="path where decrypted images live (default: from config)")
-    p.add_argument("--video-dir", default="/tmp/sns_v_test",
-                   help="path where decrypted videos live (default: /tmp/sns_v_test)")
+    p.add_argument("--video-dir",
+                   help="path where restored videos live (default: same as --image-dir)")
     args = p.parse_args(argv)
 
     # Only load config when an arg is missing — the worktree's example config
@@ -390,7 +390,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     image_dir = args.image_dir or os.path.join(
         os.path.expanduser(cfg.get("decoded_image_dir", "decoded_images")), "sns"
     )
-    video_dir = args.video_dir
+    # 视频和图片都落到 <decoded_image_dir>/sns/ 同目录(只是后缀不同), 默认共用
+    video_dir = args.video_dir or image_dir
 
     return analyze(db_path, user, image_dir, video_dir)
 
