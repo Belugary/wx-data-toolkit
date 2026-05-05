@@ -229,7 +229,9 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 
 ### 图片解密 (V2 格式)
 
-微信 4.0 (2025-08+) 的 .dat 图片文件使用 AES-128-ECB + XOR 混合加密 (V2 格式)。AES 密钥需要从运行中的微信进程内存中提取：
+微信 4.0 (2025-08+) 的 .dat 图片文件使用 AES-128-ECB + XOR 混合加密 (V2 格式)。AES 密钥的获取方式因平台而异：
+
+**Windows / Linux**（从进程内存扫描）：
 
 ```bash
 # 1. 在微信中打开查看 2-3 张图片（点击看大图）
@@ -240,9 +242,19 @@ python find_image_key_monitor.py
 python find_image_key.py
 ```
 
-密钥会自动保存到 `config.json` 的 `image_aes_key` 字段。之后 `monitor_web.py` 启动时会自动加载密钥，图片消息将显示内联预览。
+> AES 密钥仅在微信查看图片时临时加载到内存中。如果扫描未找到密钥，请先在微信中查看几张图片，然后立即重新运行脚本。
 
-> **注意**: AES 密钥仅在微信查看图片时临时加载到内存中。如果扫描未找到密钥，请先在微信中查看几张图片，然后立即重新运行脚本。
+**macOS**（从磁盘 kvcomm 缓存派生，**无需扫描进程内存**）：
+
+```bash
+python find_image_key_macos.py
+```
+
+无需提前在微信中查看图片，无需 root 权限，无需重签名。脚本会扫描 `~/Library/Containers/com.tencent.xinWeChat/.../app_data/net/kvcomm/key_*.statistic` 文件名提取派生码 `code`，配合 `db_dir` 路径里的 wxid，按 `aes_key = MD5(str(code) + cleaned_wxid)[:16]` / `xor_key = code & 0xFF` 的规则推算密钥，并用一张 V2 `_t.dat` 缩略图做 AES 模板验证。解决 [issue #23](https://github.com/ylytdeng/wechat-decrypt/issues/23)（macOS 内存扫描器 197K 候选全部失败）。
+
+派生算法的发现归功于 [@hicccc77](https://github.com/hicccc77) 在 issue #23 的[评论](https://github.com/ylytdeng/wechat-decrypt/issues/23)，参考实现见其 [WeFlow 项目](https://github.com/hicccc77/WeFlow/blob/dev/electron/services/keyServiceMac.ts)（CC BY-NC-SA 4.0）。本仓库的 `find_image_key_macos.py` 是基于该算法的独立 Python clean-room 实现。
+
+密钥会自动保存到 `config.json` 的 `image_aes_key` / `image_xor_key` 字段。之后 `monitor_web.py` 启动时会自动加载，图片消息将显示内联预览。
 
 ## 文件说明
 
@@ -258,8 +270,9 @@ python find_image_key.py
 | `monitor_web.py` | 实时消息监听 (Web UI + SSE + 图片预览) |
 | `monitor.py` | 实时消息监听 (命令行) |
 | `decode_image.py` | 图片 .dat 文件解密模块 (XOR / V1 / V2) |
-| `find_image_key.py` | 从微信进程内存提取图片 AES 密钥 |
-| `find_image_key_monitor.py` | 持续监控版密钥提取（推荐） |
+| `find_image_key.py` | 从微信进程内存提取图片 AES 密钥（Windows / Linux） |
+| `find_image_key_monitor.py` | 持续监控版密钥提取（Windows / Linux，推荐） |
+| `find_image_key_macos.py` | macOS 版图片密钥派生（从磁盘 kvcomm 缓存推算，无需扫描内存） |
 | `latency_test.py` | 延迟测量诊断工具 |
 | `find_all_keys_macos.c` | macOS 版内存密钥扫描器 (C, Mach VM API) |
 
