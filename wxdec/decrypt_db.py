@@ -198,8 +198,9 @@ def main(argv=None):
     """批量导出微信 4.x 加密数据库到标准 SQLite 文件。
 
     退出码:
-      0 — 全部 DB 导出成功;若启用 --with-wal,所有 WAL 也合并成功
-      1 — 至少一个 DB 导出失败(或 SKIP / SQLite 校验失败)
+      0 — 全部应处理 DB 导出成功;若启用 --with-wal,所有 WAL 也合并成功
+          (无凭据 SKIP 不算失败,通常是迁移残留 / 不需处理的库)
+      1 — 至少一个 DB 导出失败(HMAC 校验 / SQLite 验证失败)
       2 — 所有 DB 导出成功但启用 --with-wal 时部分 WAL 合并失败
     """
     parser = argparse.ArgumentParser(
@@ -280,6 +281,7 @@ def main(argv=None):
 
     success = 0
     failed = 0
+    skipped = 0
     wal_merged = 0
     wal_failed = 0
     total_bytes = 0
@@ -288,7 +290,7 @@ def main(argv=None):
         key_info = get_key_info(keys, rel)
         if not key_info:
             print(f"SKIP: {rel} (无凭据)")
-            failed += 1
+            skipped += 1
             continue
 
         enc_key = bytes.fromhex(key_info["enc_key"])
@@ -350,7 +352,10 @@ def main(argv=None):
                     pass
 
     print(f"\n{'='*60}")
-    print(f"结果: {success} 成功, {failed} 失败, 共 {len(db_files)} 个")
+    if skipped:
+        print(f"结果: {success} 成功, {failed} 失败, {skipped} 跳过(无凭据), 共 {len(db_files)} 个")
+    else:
+        print(f"结果: {success} 成功, {failed} 失败, 共 {len(db_files)} 个")
     if with_wal:
         print(f"WAL: {wal_merged} 合并, {wal_failed} 失败")
     print(f"导出数据量: {total_bytes/1024/1024/1024:.1f}GB")

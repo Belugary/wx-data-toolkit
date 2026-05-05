@@ -147,6 +147,27 @@ class WithWalFlagTests(unittest.TestCase):
         )
         self.assertEqual(res["exit"], 1, "DB decrypt fail → exit 1")
 
+    def test_skip_missing_credential_does_not_fail(self):
+        """无凭据的 db (e.g. migrate/unspportmsg.db) 应被 SKIP, 不算 failed,
+        汇总单独显示 '跳过(无凭据)', 且不影响 exit code。"""
+        # harness 已建有凭据的 session.db; 再造一个没凭据的 db 模拟迁移残留
+        extra = os.path.join(self.h.db_dir, "migrate", "unspportmsg.db")
+        os.makedirs(os.path.dirname(extra), exist_ok=True)
+        with open(extra, "wb") as f:
+            f.write(b"\x00" * 4096)
+
+        res = self._run(self.h.argv_base())
+        self.assertIsNone(
+            res["exit"],
+            f"SKIP-only run should NOT exit 1, got {res['exit']}\nstdout:\n{res['stdout']}",
+        )
+        self.assertIn("SKIP: migrate/unspportmsg.db (无凭据)", res["stdout"])
+        self.assertIn("跳过(无凭据)", res["stdout"])
+        self.assertNotIn(
+            "1 失败", res["stdout"],
+            "SKIP must not be reported as a failure in summary",
+        )
+
     def test_all_success_no_explicit_exit(self):
         self.h.make_wal("session/session.db")
         res = self._run(self.h.argv_base() + ["--with-wal"])
