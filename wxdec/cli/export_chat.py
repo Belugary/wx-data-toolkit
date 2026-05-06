@@ -190,13 +190,64 @@ def _extract_transfer_extras(content):
     return out or None
 
 
+def _extract_refer_extras(content):
+    """Detect appmsg type=57 and return structured refer fields, else None.
+
+    Reuses mcp_server._extract_refer_info + _summarize_refer_content so the
+    schema/inner-type-summary logic lives in one place. Empty values are
+    dropped to keep the export compact. refer_createtime is returned as int
+    (consistent with the top-level `timestamp` field).
+    """
+    if not content or '<appmsg' not in content:
+        return None
+    root = mcp_server._parse_app_message_outer(content)
+    if root is None:
+        return None
+    appmsg = root.find('.//appmsg')
+    if appmsg is None:
+        return None
+    app_type = mcp_server._parse_int(
+        mcp_server._collapse_text(appmsg.findtext('type') or ''), 0
+    )
+    if app_type != 57:
+        return None
+
+    info = mcp_server._extract_refer_info(appmsg)
+    if not info:
+        return None
+
+    out = {}
+    if info['reply_text']:
+        out['reply_text'] = info['reply_text']
+    if info['refer_type']:
+        out['refer_type'] = info['refer_type']
+        label = mcp_server._REFER_INNER_TYPE_LABEL.get(info['refer_type'])
+        if label:
+            out['refer_type_label'] = label
+    summary = mcp_server._summarize_refer_content(
+        info['refer_type'], info['refer_content']
+    )
+    if summary:
+        out['refer_summary'] = summary
+    for k in ('refer_svrid', 'refer_fromusr', 'refer_chatusr',
+              'refer_displayname'):
+        v = info.get(k)
+        if v:
+            out[k] = v
+    refer_ts = mcp_server._parse_int(info.get('refer_createtime') or '', 0)
+    if refer_ts:
+        out['refer_createtime'] = refer_ts
+    return out or None
+
+
 def _extract_content(local_id, local_type, content, ct, chat_username, chat_display_name):
     """Return (rendered_text, extras_dict). Either may be None.
 
     extras carries structured fields for non-text message types where caller
-    wants more than the human-readable string (currently: transfer). Future
-    additions (video号 metadata, merged-forward expansion, …) can flow through
-    the same channel without changing the caller signature.
+    wants more than the human-readable string. Currently transfer (type=2000)
+    and quote/refer (type=57). Future additions (视频号 metadata, merged-forward
+    expansion, …) can flow through the same channel without changing the
+    caller signature.
     """
     content = mcp_server._decompress_content(content, ct)
     if content is None:
@@ -214,8 +265,12 @@ def _extract_content(local_id, local_type, content, ct, chat_username, chat_disp
             content, local_type, False, chat_username, chat_display_name, {}
         )
         transfer = _extract_transfer_extras(content)
-        extras = {'type': 'transfer', 'transfer': transfer} if transfer else None
-        return rendered, extras
+        if transfer:
+            return rendered, {'type': 'transfer', 'transfer': transfer}
+        refer = _extract_refer_extras(content)
+        if refer:
+            return rendered, {'type': 'quote', 'quote': refer}
+        return rendered, None
     if base == 50:
         return mcp_server._format_voip_message_text(content), None
     if base == 10000:

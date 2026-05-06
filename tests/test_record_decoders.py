@@ -466,5 +466,373 @@ class AppMessageDispatchTransferTests(unittest.TestCase):
         self.assertIn('备注: dinner', out)
 
 
+# -------- Refermsg / appmsg type=57 ----------------------------------------
+#
+# All fixtures use synthetic placeholder values — no real wxid / chatroom id /
+# displayname / message content. Real refermsg data observed during dev (see
+# survey output in docs/internal/scripts) contains PII; never write any of it
+# into fixtures or commits.
+
+
+def _refer_appmsg(
+    reply_text='这条回复',
+    refer_type='1',
+    refer_content='被引用的原文',
+    fromusr='wxid_synth_a',
+    chatusr='',
+    displayname='Sender A',
+    svrid='1' + '0' * 18,
+    createtime='1700000000',
+):
+    """Build a synthetic appmsg type=57 root element. All values are placeholder.
+
+    refer_content is set as text on the inner <content> node — ElementTree
+    handles XML escaping on .text assignment, so callers can pass raw nested
+    XML strings (matching what real refermsg/<content> looks like) without
+    manual escape().
+    """
+    import xml.etree.ElementTree as ET
+    msg = ET.Element('msg')
+    appmsg = ET.SubElement(msg, 'appmsg', appid='', sdkver='0')
+    ET.SubElement(appmsg, 'title').text = reply_text
+    ET.SubElement(appmsg, 'type').text = '57'
+    refer = ET.SubElement(appmsg, 'refermsg')
+    ET.SubElement(refer, 'type').text = refer_type
+    ET.SubElement(refer, 'svrid').text = svrid
+    ET.SubElement(refer, 'fromusr').text = fromusr
+    ET.SubElement(refer, 'chatusr').text = chatusr
+    ET.SubElement(refer, 'displayname').text = displayname
+    ET.SubElement(refer, 'content').text = refer_content
+    ET.SubElement(refer, 'createtime').text = createtime
+    return msg, ET.tostring(msg, encoding='unicode')
+
+
+class ReferInnerTypeLabelTests(unittest.TestCase):
+    def test_known_refer_inner_labels(self):
+        labels = mcp_server._REFER_INNER_TYPE_LABEL
+        self.assertEqual(labels['1'], '文本')
+        self.assertEqual(labels['3'], '图片')
+        self.assertEqual(labels['34'], '语音')
+        self.assertEqual(labels['43'], '视频')
+        self.assertEqual(labels['47'], '动画表情')
+        self.assertEqual(labels['49'], '链接/卡片')
+
+    def test_known_inner_appmsg_labels(self):
+        # refer_type=49 时 content 内层 appmsg/<type> → 标签
+        labels = mcp_server._INNER_APPMSG_TYPE_LABEL
+        self.assertEqual(labels['5'], '链接')
+        self.assertEqual(labels['6'], '文件')
+        self.assertEqual(labels['19'], '聊天记录')
+        self.assertEqual(labels['33'], '小程序')
+        self.assertEqual(labels['51'], '视频号')
+        self.assertEqual(labels['2000'], '转账')
+
+
+class ExtractReferInfoTests(unittest.TestCase):
+    def test_full_fields_round_trip(self):
+        msg, _ = _refer_appmsg(
+            reply_text='收到',
+            refer_type='1',
+            refer_content='原文',
+            fromusr='wxid_synth_b',
+            chatusr='wxid_synth_b',
+            displayname='Sender B',
+        )
+        appmsg = msg.find('.//appmsg')
+        info = mcp_server._extract_refer_info(appmsg)
+        self.assertIsNotNone(info)
+        self.assertEqual(info['reply_text'], '收到')
+        self.assertEqual(info['refer_type'], '1')
+        self.assertEqual(info['refer_content'], '原文')
+        self.assertEqual(info['refer_fromusr'], 'wxid_synth_b')
+        self.assertEqual(info['refer_chatusr'], 'wxid_synth_b')
+        self.assertEqual(info['refer_displayname'], 'Sender B')
+        self.assertTrue(info['refer_svrid'].startswith('1'))
+        self.assertEqual(info['refer_createtime'], '1700000000')
+
+    def test_missing_refermsg_returns_none(self):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(
+            '<msg><appmsg><title>x</title><type>57</type></appmsg></msg>'
+        )
+        appmsg = root.find('.//appmsg')
+        self.assertIsNone(mcp_server._extract_refer_info(appmsg))
+
+    def test_refer_content_preserves_inner_xml_for_type_49(self):
+        # refer_type=49 时 content 是嵌套 XML, _extract 不能 collapse 掉空白
+        # (那会破坏 _summarize_refer_content 的解析)
+        nested_content = (
+            '<msg><appmsg><title>嵌套链接</title><type>5</type>'
+            '<url>https://example.com/article</url></appmsg></msg>'
+        )
+        msg, _ = _refer_appmsg(refer_type='49', refer_content=nested_content)
+        appmsg = msg.find('.//appmsg')
+        info = mcp_server._extract_refer_info(appmsg)
+        self.assertIn('<appmsg', info['refer_content'])
+        self.assertIn('嵌套链接', info['refer_content'])
+
+    def test_collapse_strips_whitespace_on_scalar_fields(self):
+        msg, _ = _refer_appmsg(
+            reply_text='  收到  ',
+            displayname='\n  Sender B  \t',
+        )
+        appmsg = msg.find('.//appmsg')
+        info = mcp_server._extract_refer_info(appmsg)
+        self.assertEqual(info['reply_text'], '收到')
+        self.assertEqual(info['refer_displayname'], 'Sender B')
+
+
+class SummarizeReferContentTests(unittest.TestCase):
+    def test_text_returns_original(self):
+        out = mcp_server._summarize_refer_content('1', '一句简单回复')
+        self.assertEqual(out, '一句简单回复')
+
+    def test_text_truncates_to_max_len(self):
+        long_text = 'a' * 200
+        out = mcp_server._summarize_refer_content('1', long_text, max_len=50)
+        self.assertTrue(out.endswith('…'))
+        self.assertEqual(len(out), 51)  # 50 chars + 1 ellipsis
+
+    def test_text_collapses_whitespace(self):
+        out = mcp_server._summarize_refer_content('1', 'foo\n\nbar   baz')
+        self.assertEqual(out, 'foo bar baz')
+
+    def test_image_returns_label_not_xml(self):
+        # 关键回归: type=3 实测 content 是 <img cdnurl=... aeskey=...> 一坨,
+        # 现状直接 [:160] 截会出乱码 — 必须给标签
+        img_content = (
+            '<msg><img aeskey="x" cdnthumburl="y" '
+            'cdnmidimgurl="z" md5="abc"/></msg>'
+        )
+        out = mcp_server._summarize_refer_content('3', img_content)
+        self.assertEqual(out, '[图片]')
+
+    def test_voice_returns_label(self):
+        voice_content = (
+            '<msg><voicemsg voiceformat="4" voicelength="10000"/></msg>'
+        )
+        out = mcp_server._summarize_refer_content('34', voice_content)
+        self.assertEqual(out, '[语音]')
+
+    def test_emoji_returns_label(self):
+        out = mcp_server._summarize_refer_content(
+            '47', '<msg><emoji md5="x"/></msg>'
+        )
+        self.assertEqual(out, '[动画表情]')
+
+    def test_video_returns_label(self):
+        out = mcp_server._summarize_refer_content('43', '<msg><videomsg/></msg>')
+        self.assertEqual(out, '[视频]')
+
+    def test_nested_link_card_summary(self):
+        nested = (
+            '<msg><appmsg><title>文章标题</title><type>5</type>'
+            '<des>摘要</des></appmsg></msg>'
+        )
+        out = mcp_server._summarize_refer_content('49', nested)
+        self.assertEqual(out, '[链接] 文章标题')
+
+    def test_nested_file_card_summary(self):
+        nested = (
+            '<msg><appmsg><title>report.pdf</title><type>6</type></appmsg></msg>'
+        )
+        out = mcp_server._summarize_refer_content('49', nested)
+        self.assertEqual(out, '[文件] report.pdf')
+
+    def test_nested_record_card_summary(self):
+        nested = (
+            '<msg><appmsg><title>聊天记录</title><type>19</type></appmsg></msg>'
+        )
+        out = mcp_server._summarize_refer_content('49', nested)
+        self.assertEqual(out, '[聊天记录] 聊天记录')
+
+    def test_nested_unknown_inner_type_falls_back(self):
+        nested = (
+            '<msg><appmsg><title>unknown</title><type>9999</type></appmsg></msg>'
+        )
+        out = mcp_server._summarize_refer_content('49', nested)
+        self.assertIn('9999', out)
+        self.assertIn('unknown', out)
+
+    def test_nested_invalid_xml_falls_back_to_card(self):
+        out = mcp_server._summarize_refer_content('49', 'not xml at all')
+        self.assertEqual(out, '[卡片]')
+
+    def test_unknown_refer_type_falls_back(self):
+        out = mcp_server._summarize_refer_content('999', 'something')
+        self.assertEqual(out, '[type=999]')
+
+    def test_empty_content_with_known_type(self):
+        out = mcp_server._summarize_refer_content('3', '')
+        self.assertEqual(out, '[图片]')
+
+    def test_empty_content_empty_type(self):
+        out = mcp_server._summarize_refer_content('', '')
+        self.assertEqual(out, '[引用消息]')
+
+
+class FormatReferMessageTextTests(unittest.TestCase):
+    """两行格式: <用户回复> + ↳ 回复 <对方>: <摘要>。
+    sender 解析逻辑由 _resolve_quote_sender_label 负责，这里测拼装行为。"""
+
+    def test_text_refer_in_1v1(self):
+        msg, _ = _refer_appmsg(
+            reply_text='收到',
+            refer_type='1',
+            refer_content='原文',
+            fromusr='wxid_synth_b',
+            displayname='对方',
+        )
+        appmsg = msg.find('.//appmsg')
+        out = mcp_server._format_refer_message_text(
+            appmsg, False, 'wxid_synth_b', '对方', {}
+        )
+        self.assertIn('收到', out)
+        self.assertIn('回复 对方:', out)
+        self.assertIn('原文', out)
+
+    def test_image_refer_uses_label_not_xml_payload(self):
+        # 关键回归: 不能把 cdnurl/aeskey/md5 那一坨字符串截断给用户看
+        img_content = '<msg><img aeskey="X" cdnurl="Y" md5="Z"/></msg>'
+        msg, _ = _refer_appmsg(
+            reply_text='哈哈',
+            refer_type='3',
+            refer_content=img_content,
+            fromusr='wxid_synth_b',
+            displayname='对方',
+        )
+        appmsg = msg.find('.//appmsg')
+        out = mcp_server._format_refer_message_text(
+            appmsg, False, 'wxid_synth_b', '对方', {}
+        )
+        self.assertIn('哈哈', out)
+        self.assertIn('[图片]', out)
+        self.assertNotIn('cdnurl', out)
+        self.assertNotIn('aeskey', out)
+        self.assertNotIn('md5', out)
+
+    def test_missing_refermsg_falls_back_to_title(self):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(
+            '<msg><appmsg><title>原回复</title><type>57</type></appmsg></msg>'
+        )
+        appmsg = root.find('.//appmsg')
+        out = mcp_server._format_refer_message_text(
+            appmsg, False, 'wxid_x', 'x', {}
+        )
+        self.assertEqual(out, '原回复')
+
+    def test_empty_reply_uses_placeholder(self):
+        msg, _ = _refer_appmsg(
+            reply_text='', refer_type='1', refer_content='被引用'
+        )
+        appmsg = msg.find('.//appmsg')
+        out = mcp_server._format_refer_message_text(
+            appmsg, False, 'wxid_synth_b', '对方', {}
+        )
+        self.assertIn('[引用消息]', out)
+        self.assertIn('被引用', out)
+
+
+class AppMessageDispatchReferTests(unittest.TestCase):
+    """type=57 must route through _format_refer_message_text via
+    _format_app_message_text (so get_chat_history / export_chat both pick it up)."""
+
+    def test_dispatch_text_refer(self):
+        _, xml_text = _refer_appmsg(
+            reply_text='来了',
+            refer_type='1',
+            refer_content='你在哪',
+            fromusr='wxid_synth_b',
+            displayname='对方',
+        )
+        out = mcp_server._format_app_message_text(
+            xml_text, 49, False, 'wxid_synth_b', '对方', {}
+        )
+        self.assertIsNotNone(out)
+        self.assertIn('来了', out)
+        self.assertIn('回复 对方:', out)
+        self.assertIn('你在哪', out)
+
+    def test_dispatch_image_refer_renders_label(self):
+        img_content = '<msg><img aeskey="X" cdnurl="Y" md5="Z"/></msg>'
+        _, xml_text = _refer_appmsg(
+            reply_text='哈哈',
+            refer_type='3',
+            refer_content=img_content,
+            fromusr='wxid_synth_b',
+            displayname='对方',
+        )
+        out = mcp_server._format_app_message_text(
+            xml_text, 49, False, 'wxid_synth_b', '对方', {}
+        )
+        self.assertIsNotNone(out)
+        self.assertIn('[图片]', out)
+        self.assertNotIn('cdnurl', out)
+
+
+class ExtractReferExtrasTests(unittest.TestCase):
+    """export_chat._extract_refer_extras 必须识别 type=57 + 复用 mcp_server helpers，
+    输出紧凑的 dict (空值 dropped, refer_createtime 转成 int)。"""
+
+    def setUp(self):
+        from wxdec.cli import export_chat
+        self.export_chat = export_chat
+
+    def test_text_refer_extras(self):
+        _, xml_text = _refer_appmsg(
+            reply_text='收到',
+            refer_type='1',
+            refer_content='原文',
+            fromusr='wxid_synth_b',
+            displayname='Sender B',
+        )
+        out = self.export_chat._extract_refer_extras(xml_text)
+        self.assertIsNotNone(out)
+        self.assertEqual(out['reply_text'], '收到')
+        self.assertEqual(out['refer_type'], '1')
+        self.assertEqual(out['refer_type_label'], '文本')
+        self.assertEqual(out['refer_summary'], '原文')
+        self.assertEqual(out['refer_fromusr'], 'wxid_synth_b')
+        self.assertEqual(out['refer_displayname'], 'Sender B')
+        self.assertEqual(out['refer_createtime'], 1700000000)
+
+    def test_image_refer_extras_uses_label_summary(self):
+        img_content = '<msg><img aeskey="X" cdnurl="Y" md5="Z"/></msg>'
+        _, xml_text = _refer_appmsg(
+            refer_type='3',
+            refer_content=img_content,
+        )
+        out = self.export_chat._extract_refer_extras(xml_text)
+        self.assertIsNotNone(out)
+        self.assertEqual(out['refer_type'], '3')
+        self.assertEqual(out['refer_type_label'], '图片')
+        self.assertEqual(out['refer_summary'], '[图片]')
+        # 关键: cdnurl/aeskey/md5 不能漏到导出 JSON 里
+        for v in out.values():
+            self.assertNotIn('cdnurl', str(v))
+            self.assertNotIn('aeskey', str(v))
+
+    def test_non_refer_returns_none(self):
+        # type=2000 转账消息不应该被 refer extras 误识别
+        _, xml_text = _transfer_appmsg(paysubtype='3')
+        self.assertIsNone(self.export_chat._extract_refer_extras(xml_text))
+
+    def test_no_appmsg_returns_none(self):
+        self.assertIsNone(self.export_chat._extract_refer_extras('plain text'))
+        self.assertIsNone(self.export_chat._extract_refer_extras(''))
+
+    def test_empty_chatusr_dropped(self):
+        # 1v1 场景下 chatusr 一般为空,extras 不应该带空字段
+        _, xml_text = _refer_appmsg(
+            refer_type='1',
+            refer_content='hi',
+            chatusr='',
+        )
+        out = self.export_chat._extract_refer_extras(xml_text)
+        self.assertIsNotNone(out)
+        self.assertNotIn('refer_chatusr', out)
+
+
 if __name__ == '__main__':
     unittest.main()

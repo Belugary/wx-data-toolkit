@@ -1,0 +1,52 @@
+"""
+读取微信引用回复消息（appmsg type=57）的结构化字段。
+
+用法:
+    .venv/bin/python3 -m wxdec.cli.decode_refer <chat_name> <local_id> [<ts>]
+
+参数:
+    <chat_name>  联系人显示名、备注名或 wxid（1v1 或群聊都可能有引用消息）。
+    <local_id>   引用消息的 local_id（从 export_chat 输出 / monitor_web 等地方获取）。
+    [<ts>]       可选 unix 时间戳。当 local_id 在多个分片冲突时用它唯一定位。
+
+输出: 多行可读文本，含回复正文、被引用消息发送者/类型/摘要/svrid/createtime。
+      被引用消息的 type 决定摘要风格：1 文本展开原文，3/34/43/47/48/50 给标签，
+      49 嵌套 appmsg 解一层 inner type。
+
+需先完成 WeChat DB 解密（详见 README）。本 CLI 是 mcp_server.decode_refer
+工具的命令行包装，输出格式与 MCP 工具一致。
+"""
+import argparse
+import sys
+
+from wxdec import mcp_server
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m wxdec.cli.decode_refer",
+        description="读取微信引用回复消息的结构化字段",
+    )
+    parser.add_argument("chat_name", help="联系人名/备注/wxid")
+    parser.add_argument("local_id", type=int, help="引用消息的 local_id")
+    parser.add_argument(
+        "ts",
+        nargs="?",
+        type=int,
+        default=0,
+        help="消息的 unix 时间戳（跨分片唯一定位时需要，可省略）",
+    )
+    args = parser.parse_args()
+
+    result = mcp_server.decode_refer(args.chat_name, args.local_id, args.ts)
+    print(result)
+    # 错误文案 → 非 0 退出码，便于 shell 脚本判断
+    if result.startswith(("错误:", "找不到", "不是引用消息", "无法解析", "消息中没有", "消息 content")):
+        return 1
+    if "无法唯一定位" in result:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

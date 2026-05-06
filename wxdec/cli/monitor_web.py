@@ -19,6 +19,7 @@ import zstandard as zstd
 from wxdec.decode_image import extract_md5_from_packed_info, decrypt_dat_file, is_v2_format
 from wxdec.key_utils import get_key_info, strip_key_metadata
 from wxdec.decrypt_db import full_decrypt, decrypt_wal_full
+from wxdec import mcp_server  # 复用 _extract_refer_info / _summarize_refer_content / _REFER_INNER_TYPE_LABEL
 
 _zstd_dctx = zstd.ZstdDecompressor()
 
@@ -1064,17 +1065,35 @@ class SessionMonitor:
                 app_type = int(appmsg.findtext('type') or sub_type or 0)
 
                 if app_type == 57:
-                    # 引用回复: title 是回复内容
-                    ref = appmsg.find('.//refermsg')
-                    ref_name = ref.findtext('displayname') if ref is not None else ''
-                    ref_content = ref.findtext('content') if ref is not None else ''
-                    if ref_content:
-                        ref_content = ref_content.strip()[:100]
+                    # 引用回复 — 关键: refermsg/<content> 是 escape 后的字符串,
+                    # 内层 type 决定其 schema (1 文本 / 3 图片 cdn / 34 voicemsg /
+                    # 47 emoji / 49 嵌套 appmsg)。直接截 100 字给前端会出 cdn url +
+                    # aeskey 一坨乱码 (issue #44 #45)，复用 mcp_server 的 schema-aware
+                    # 摘要器避免重新发明轮子。
+                    info = mcp_server._extract_refer_info(appmsg)
+                    if info is None:
+                        return {
+                            'type': 'quote',
+                            'title': title,
+                            'ref_name': '',
+                            'ref_content': '',
+                            'ref_type': '',
+                            'ref_type_label': '',
+                        }
+                    summary = mcp_server._summarize_refer_content(
+                        info['refer_type'], info['refer_content']
+                    )
+                    refer_label = mcp_server._REFER_INNER_TYPE_LABEL.get(
+                        info['refer_type'], ''
+                    )
                     return {
                         'type': 'quote',
-                        'title': title,
-                        'ref_name': ref_name or '',
-                        'ref_content': ref_content or '',
+                        'title': info['reply_text'] or title,
+                        'ref_name': (info['refer_displayname']
+                                     or info['refer_fromusr'] or ''),
+                        'ref_content': summary,
+                        'ref_type': info['refer_type'],
+                        'ref_type_label': refer_label,
                     }
                 elif app_type == 6:
                     # 文件
