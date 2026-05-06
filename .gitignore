@@ -38,3 +38,4 @@ voice_transcriptions.json
 # Claude Code 工作流内部规范（不上传公共 fork）
 CLAUDE.md
 .claude/
+docs/internal/
