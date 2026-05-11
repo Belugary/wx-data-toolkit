@@ -15,6 +15,7 @@ import tempfile
 import hashlib
 import atexit
 import pathlib
+import threading
 from Crypto.Cipher import AES
 from wxdec.config import load_config
 from wxdec.key_utils import get_key_info, key_path_variants, strip_key_metadata
@@ -28,21 +29,10 @@ SQLITE_HDR = b'SQLite format 3\x00'
 WAL_HEADER_SZ = 32
 WAL_FRAME_HEADER_SZ = 24
 
-# ============ Config loading ============
-# SCRIPT_DIR 仍被下方 decoded_voices / voice_transcriptions.json 等 cache 文件
-# 路径复用，故保留；config 字段统一走 wxdec.config.load_config，避免重复造轮子
-# 又写错（曾漏 expanduser，导致 "~/Documents/..." 被错拼成 SCRIPT_DIR/~/...）。
+# SCRIPT_DIR 是纯路径计算 (无 I/O), 被 voice_transcriptions.json 等 cache 路径
+# 复用. 保留 eager 求值; config / keys 文件的实际读取走下方 _State, lazy.
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_cfg = load_config()
-DB_DIR = _cfg["db_dir"]
-KEYS_FILE = _cfg["keys_file"]
-DECRYPTED_DIR = _cfg["decrypted_dir"]
-WECHAT_BASE_DIR = _cfg["wechat_base_dir"]
-DECODED_IMAGE_DIR = _cfg["decoded_image_dir"]
-
-with open(KEYS_FILE, encoding="utf-8") as f:
-    ALL_KEYS = strip_key_metadata(json.load(f))
 
 # ============ Decryption functions ============
 
@@ -117,7 +107,12 @@ class DBCache:
     CACHE_DIR = os.path.join(tempfile.gettempdir(), "wechat_mcp_cache")
     MTIME_FILE = os.path.join(tempfile.gettempdir(), "wechat_mcp_cache", "_mtimes.json")
 
-    def __init__(self):
+    def __init__(self, db_dir, all_keys):
+        # db_dir / all_keys 显式注入,不再依赖 module-level globals,这样:
+        #  - 单元测试可以构造孤立的 DBCache 实例
+        #  - 未来支持多账号时同一进程可并存多个 cache
+        self._db_dir = db_dir
+        self._all_keys = all_keys
         self._cache = {}  # rel_key -> (db_mtime, wal_mtime, tmp_path)
         os.makedirs(self.CACHE_DIR, exist_ok=True)
         self._load_persistent_cache()
@@ -142,7 +137,7 @@ class DBCache:
             if not os.path.exists(tmp_path):
                 continue
             rel_path = rel_key.replace('\\', os.sep)
-            db_path = os.path.join(DB_DIR, rel_path)
+            db_path = os.path.join(self._db_dir, rel_path)
             wal_path = db_path + "-wal"
             try:
                 db_mtime = os.path.getmtime(db_path)
@@ -167,11 +162,11 @@ class DBCache:
             pass
 
     def get(self, rel_key):
-        key_info = get_key_info(ALL_KEYS, rel_key)
+        key_info = get_key_info(self._all_keys, rel_key)
         if not key_info:
             return None
         rel_path = rel_key.replace('\\', '/').replace('/', os.sep)
-        db_path = os.path.join(DB_DIR, rel_path)
+        db_path = os.path.join(self._db_dir, rel_path)
         wal_path = db_path + "-wal"
         if not os.path.exists(db_path):
             return None
@@ -201,16 +196,72 @@ class DBCache:
         self._save_persistent_cache()
 
 
-_cache = DBCache()
-atexit.register(_cache.cleanup)
+# ============ Lazy module state ============
+# 把所有 module-level I/O (config 读取 / 凭据文件 / 临时目录创建 / atexit 注册)
+# 都收进 _State, 第一次访问 _cache / _cfg / DB_DIR 等 lazy 名字时才触发. 这样:
+#  - 测试 / 工具脚本如果只需要纯 helper (decrypt_page, open_db_readonly),
+#    不会被 config 加载链绑架, 缺 config.json 的环境也能 import 这个模块
+#  - 错误延迟到第一次实际使用, call site 更清晰
+#  - 单元测试可以直接构造 DBCache(db_dir=..., all_keys={}), 不必整套环境
 
-# 消息 DB 的 rel_keys
-# 用 message_\d+\.db$ 匹配，自然排除 message_resource.db / message_fts_*.db
-MSG_DB_KEYS = sorted([
-    k for k in ALL_KEYS
-    if any(v.startswith("message/") for v in key_path_variants(k))
-    and any(re.search(r"message_\d+\.db$", v) for v in key_path_variants(k))
-])
+_state = None
+_init_lock = threading.Lock()
+
+
+class _State:
+    """Lazy-built singleton holding config, keys, and the decryption cache."""
+
+    def __init__(self):
+        self.cfg = load_config()
+        self.db_dir = self.cfg["db_dir"]
+        self.keys_file = self.cfg["keys_file"]
+        self.decrypted_dir = self.cfg["decrypted_dir"]
+        self.wechat_base_dir = self.cfg["wechat_base_dir"]
+        self.decoded_image_dir = self.cfg["decoded_image_dir"]
+        with open(self.keys_file, encoding="utf-8") as f:
+            self.all_keys = strip_key_metadata(json.load(f))
+        # 消息 DB 的 rel_keys
+        # 用 message_\d+\.db$ 匹配，自然排除 message_resource.db / message_fts_*.db
+        self.msg_db_keys = sorted([
+            k for k in self.all_keys
+            if any(v.startswith("message/") for v in key_path_variants(k))
+            and any(re.search(r"message_\d+\.db$", v) for v in key_path_variants(k))
+        ])
+        self.cache = DBCache(db_dir=self.db_dir, all_keys=self.all_keys)
+        atexit.register(self.cache.cleanup)
+
+
+def _ensure_state():
+    global _state
+    if _state is not None:
+        return _state
+    with _init_lock:
+        if _state is None:
+            _state = _State()
+    return _state
+
+
+# Module-level 名字 → _State 属性的映射. 现有调用方代码 (from db_core import
+# _cache / DB_DIR / ...) 完全不动, 通过 PEP 562 __getattr__ 透明 lazy-resolve.
+_LAZY_ATTRS = {
+    "_cfg": "cfg",
+    "_cache": "cache",
+    "ALL_KEYS": "all_keys",
+    "MSG_DB_KEYS": "msg_db_keys",
+    "DB_DIR": "db_dir",
+    "KEYS_FILE": "keys_file",
+    "DECRYPTED_DIR": "decrypted_dir",
+    "WECHAT_BASE_DIR": "wechat_base_dir",
+    "DECODED_IMAGE_DIR": "decoded_image_dir",
+}
+
+
+def __getattr__(name):
+    # PEP 562: 仅当 module dict 里找不到 name 时 Python 才调这个 hook.
+    # 故 SCRIPT_DIR / 函数 / 类 / 常量直接命中 module dict, 不走这里.
+    if name in _LAZY_ATTRS:
+        return getattr(_ensure_state(), _LAZY_ATTRS[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ============ Connection helper ============
