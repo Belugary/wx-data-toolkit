@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from wxdec import mcp_server
+from wxdec import msg_query
 
 
 class _FakeCache:
@@ -152,7 +153,7 @@ class SearchMessagesTests(unittest.TestCase):
         ]
 
         with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice", "bob": "Bob"}), patch.object(
-            mcp_server, "_resolve_chat_contexts", return_value=(contexts, [], [])
+            msg_query, "_resolve_chat_contexts", return_value=(contexts, [], [])
         ):
             result = mcp_server.search_messages("foo", chat_name=["Alice", "Bob"], limit=2, offset=1)
 
@@ -173,8 +174,8 @@ class SearchMessagesTests(unittest.TestCase):
         )
         fake_cache = _FakeCache({"older": older_db, "newer": newer_db})
 
-        with patch.object(mcp_server, "MSG_DB_KEYS", ["older", "newer"]), patch.object(
-            mcp_server, "_cache", fake_cache
+        with patch.object(msg_query, "MSG_DB_KEYS", ["older", "newer"]), patch.object(
+            msg_query, "_cache", fake_cache
         ), patch.object(
             mcp_server,
             "get_contact_names",
@@ -197,21 +198,21 @@ class SearchMessagesTests(unittest.TestCase):
             {"newer_user": [(1, 30, "foo newer 1"), (2, 20, "foo newer 2"), (3, 19, "foo newer 3")]},
         )
         fake_cache = _FakeCache({"older": older_db, "newer": newer_db})
-        original_query_messages = mcp_server._query_messages
+        original_query_messages = msg_query._query_messages
         calls = []
 
         def recording_query_messages(*args, **kwargs):
             calls.append((args[1], kwargs.get("limit"), kwargs.get("offset", 0)))
             return original_query_messages(*args, **kwargs)
 
-        with patch.object(mcp_server, "MSG_DB_KEYS", ["older", "newer"]), patch.object(
-            mcp_server, "_cache", fake_cache
+        with patch.object(msg_query, "MSG_DB_KEYS", ["older", "newer"]), patch.object(
+            msg_query, "_cache", fake_cache
         ), patch.object(
             mcp_server,
             "get_contact_names",
             return_value={"older_user": "Older", "newer_user": "Newer"},
         ), patch.object(
-            mcp_server, "_query_messages", side_effect=recording_query_messages
+            msg_query, "_query_messages", side_effect=recording_query_messages
         ):
             result = mcp_server.search_messages("foo", limit=2, offset=1)
 
@@ -296,7 +297,7 @@ class SearchMessagesTests(unittest.TestCase):
         ]
 
         with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice", "bob": "Bob"}), patch.object(
-            mcp_server, "_resolve_chat_contexts", return_value=(contexts, [], [])
+            msg_query, "_resolve_chat_contexts", return_value=(contexts, [], [])
         ), patch.object(
             mcp_server, "_parse_time_range", return_value=(250, 400)
         ):
@@ -329,8 +330,8 @@ class SearchMessagesTests(unittest.TestCase):
         )
         fake_cache = _FakeCache({"all": db_path})
 
-        with patch.object(mcp_server, "MSG_DB_KEYS", ["all"]), patch.object(
-            mcp_server, "_cache", fake_cache
+        with patch.object(msg_query, "MSG_DB_KEYS", ["all"]), patch.object(
+            msg_query, "_cache", fake_cache
         ), patch.object(
             mcp_server,
             "get_contact_names",
@@ -440,7 +441,7 @@ class SearchMessagesTests(unittest.TestCase):
             "message_tables": [{"db_path": db_path, "table_name": _msg_table_name("alice")}],
             "is_group": False,
         }
-        original_query_messages = mcp_server._query_messages
+        original_query_messages = msg_query._query_messages
         calls = []
 
         def recording_query_messages(*args, **kwargs):
@@ -450,7 +451,7 @@ class SearchMessagesTests(unittest.TestCase):
         with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
             mcp_server, "_resolve_chat_context", return_value=ctx
         ), patch.object(
-            mcp_server, "_query_messages", side_effect=recording_query_messages
+            msg_query, "_query_messages", side_effect=recording_query_messages
         ):
             result = mcp_server.get_chat_history("Alice", limit=2, offset=1)
 
@@ -505,7 +506,7 @@ class SearchMessagesTests(unittest.TestCase):
             "message_tables": [{"db_path": db_path, "table_name": _msg_table_name("alice")}],
             "is_group": False,
         }
-        original_build_history_line = mcp_server._build_history_line
+        original_build_history_line = msg_query._build_history_line
 
         def flaky_build_history_line(row, *args, **kwargs):
             if row[2] == 100:
@@ -515,7 +516,7 @@ class SearchMessagesTests(unittest.TestCase):
         with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
             mcp_server, "_resolve_chat_context", return_value=ctx
         ), patch.object(
-            mcp_server, "_build_history_line", side_effect=flaky_build_history_line
+            msg_query, "_build_history_line", side_effect=flaky_build_history_line
         ):
             result = mcp_server.get_chat_history("Alice", limit=2, offset=0)
 
@@ -608,7 +609,7 @@ class SearchMessagesTests(unittest.TestCase):
             "message_tables": [{"db_path": db_path, "table_name": _msg_table_name("alice")}],
             "is_group": False,
         }
-        original_build_search_entry = mcp_server._build_search_entry
+        original_build_search_entry = msg_query._build_search_entry
 
         def flaky_build_search_entry(row, *args, **kwargs):
             if row[2] == 300:
@@ -620,7 +621,7 @@ class SearchMessagesTests(unittest.TestCase):
         with patch.object(mcp_server, "get_contact_names", return_value={"alice": "Alice"}), patch.object(
             mcp_server, "_resolve_chat_context", return_value=ctx
         ), patch.object(
-            mcp_server, "_build_search_entry", side_effect=flaky_build_search_entry
+            msg_query, "_build_search_entry", side_effect=flaky_build_search_entry
         ):
             result = mcp_server.search_messages("foo", chat_name="Alice", limit=3, offset=0)
 

@@ -27,6 +27,7 @@ import tempfile
 import unittest
 
 from wxdec import mcp_server
+from wxdec import msg_format
 
 
 # -------- _safe_basename ----------------------------------------------------
@@ -293,9 +294,9 @@ class FormatRecordMessageTextTests(unittest.TestCase):
     def test_overflow_truncation_marker(self):
         # > _RECORD_MAX_ITEMS dataitems should produce a
         # "…（还有 N 条未显示）" line.
-        original_max = mcp_server._RECORD_MAX_ITEMS
+        original_max = msg_format._RECORD_MAX_ITEMS
         try:
-            mcp_server._RECORD_MAX_ITEMS = 3
+            msg_format._RECORD_MAX_ITEMS = 3
             items_xml = ''.join(
                 f'<dataitem datatype="1"><datadesc>m{i}</datadesc></dataitem>'
                 for i in range(7)
@@ -306,7 +307,7 @@ class FormatRecordMessageTextTests(unittest.TestCase):
             )
             self.assertIn('还有 4 条未显示', out)
         finally:
-            mcp_server._RECORD_MAX_ITEMS = original_max
+            msg_format._RECORD_MAX_ITEMS = original_max
 
 
 # -------- WCPay transfer (appmsg type=2000) --------------------------------

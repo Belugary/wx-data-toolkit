@@ -19,7 +19,7 @@ import zstandard as zstd
 from wxdec.decode_image import extract_md5_from_packed_info, decrypt_dat_file, is_v2_format
 from wxdec.key_utils import get_key_info, strip_key_metadata
 from wxdec.decrypt_db import full_decrypt, decrypt_wal_full
-from wxdec import mcp_server  # 复用 _extract_refer_info / _summarize_refer_content / _REFER_INNER_TYPE_LABEL
+from wxdec import msg_format  # 复用 _extract_refer_info / _summarize_refer_content / _REFER_INNER_TYPE_LABEL
 
 _zstd_dctx = zstd.ZstdDecompressor()
 
@@ -1068,9 +1068,9 @@ class SessionMonitor:
                     # 引用回复 — 关键: refermsg/<content> 是 escape 后的字符串,
                     # 内层 type 决定其 schema (1 文本 / 3 图片 cdn / 34 voicemsg /
                     # 47 emoji / 49 嵌套 appmsg)。直接截 100 字给前端会出 cdn url +
-                    # aeskey 一坨乱码 (issue #44 #45)，复用 mcp_server 的 schema-aware
+                    # aeskey 一坨乱码 (issue #44 #45)，复用 msg_format 的 schema-aware
                     # 摘要器避免重新发明轮子。
-                    info = mcp_server._extract_refer_info(appmsg)
+                    info = msg_format._extract_refer_info(appmsg)
                     if info is None:
                         return {
                             'type': 'quote',
@@ -1080,10 +1080,10 @@ class SessionMonitor:
                             'ref_type': '',
                             'ref_type_label': '',
                         }
-                    summary = mcp_server._summarize_refer_content(
+                    summary = msg_format._summarize_refer_content(
                         info['refer_type'], info['refer_content']
                     )
-                    refer_label = mcp_server._REFER_INNER_TYPE_LABEL.get(
+                    refer_label = msg_format._REFER_INNER_TYPE_LABEL.get(
                         info['refer_type'], ''
                     )
                     return {

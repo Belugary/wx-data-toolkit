@@ -29,6 +29,7 @@ import sys
 from datetime import datetime
 
 from wxdec import mcp_server
+from wxdec.contact import resolve_username
 
 
 def _transcribe_local_id(username, local_id, backend):
@@ -57,7 +58,7 @@ def transcribe_export(input_path, output_path):
     username = data.get("username")
     chat_name = data.get("chat", "")
     if not username:
-        username = mcp_server.resolve_username(chat_name)
+        username = resolve_username(chat_name)
     if not username:
         print(f"Could not resolve username for: {chat_name}")
         sys.exit(1)

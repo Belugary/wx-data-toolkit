@@ -40,7 +40,8 @@ import sys
 from contextlib import closing
 from datetime import datetime
 
-from wxdec import mcp_server
+from wxdec import msg_format, msg_query
+from wxdec.contact import get_contact_names
 
 
 MSG_TYPE_MAP = {
@@ -59,7 +60,7 @@ MSG_TYPE_MAP = {
 
 
 def _msg_type_str(local_type):
-    base, _ = mcp_server._split_msg_type(local_type)
+    base, _ = msg_format._split_msg_type(local_type)
     return MSG_TYPE_MAP.get(base, f"type_{local_type}")
 
 
@@ -71,11 +72,11 @@ def _resolve_sender(row, ctx, names, id_to_username):
     string for unattributable messages (e.g. system notifications).
     """
     local_id, local_type, create_time, real_sender_id, content, ct = row
-    decoded = mcp_server._decompress_content(content, ct)
-    sender_from_content, _ = mcp_server._format_message_text(
+    decoded = msg_format._decompress_content(content, ct)
+    sender_from_content, _ = msg_format._format_message_text(
         local_id, local_type, decoded, ctx["is_group"], ctx["username"], ctx["display_name"], names
     )
-    label = mcp_server._resolve_sender_label(
+    label = msg_format._resolve_sender_label(
         real_sender_id,
         sender_from_content,
         ctx["is_group"],
@@ -114,7 +115,7 @@ def _decode_sticker_desc(b64_desc):
 
 
 def _format_sticker_message(content):
-    root = mcp_server._parse_xml_root(content) if content else None
+    root = msg_format._parse_xml_root(content) if content else None
     if root is None:
         return "[表情]"
     emoji = root.find(".//emoji")
@@ -130,7 +131,7 @@ def _format_system_message(content):
         return "[系统消息]"
     if "<sysmsg" not in content:
         return content
-    root = mcp_server._parse_xml_root(content)
+    root = msg_format._parse_xml_root(content)
     if root is None:
         return content
     inner = root.findtext(".//content")
@@ -138,7 +139,7 @@ def _format_system_message(content):
 
 
 def _format_video_message(content):
-    root = mcp_server._parse_xml_root(content) if content else None
+    root = msg_format._parse_xml_root(content) if content else None
     if root is None:
         return "[视频]"
     video = root.find(".//videomsg")
@@ -151,26 +152,26 @@ def _format_video_message(content):
 def _extract_transfer_extras(content):
     """Detect appmsg type=2000 and return structured transfer fields, else None.
 
-    Reuses mcp_server._extract_transfer_info so the schema/version-quirks logic
+    Reuses msg_format._extract_transfer_info so the schema/version-quirks logic
     lives in one place. Empty values are dropped to keep the export compact.
     Numeric timestamps are returned as ints (consistent with the top-level
     `timestamp` field), not iso strings — downstream consumers can format.
     """
     if not content or '<appmsg' not in content:
         return None
-    root = mcp_server._parse_app_message_outer(content)
+    root = msg_format._parse_app_message_outer(content)
     if root is None:
         return None
     appmsg = root.find('.//appmsg')
     if appmsg is None:
         return None
-    app_type = mcp_server._parse_int(
-        mcp_server._collapse_text(appmsg.findtext('type') or ''), 0
+    app_type = msg_format._parse_int(
+        msg_format._collapse_text(appmsg.findtext('type') or ''), 0
     )
     if app_type != 2000:
         return None
 
-    info = mcp_server._extract_transfer_info(appmsg)
+    info = msg_format._extract_transfer_info(appmsg)
     if not info:
         return None
 
@@ -184,7 +185,7 @@ def _extract_transfer_extras(content):
         if v:
             out[k] = v
     for k in ('begin_transfer_time', 'invalid_time'):
-        v = mcp_server._parse_int(info.get(k) or '', 0)
+        v = msg_format._parse_int(info.get(k) or '', 0)
         if v:
             out[k] = v
     return out or None
@@ -193,26 +194,26 @@ def _extract_transfer_extras(content):
 def _extract_refer_extras(content):
     """Detect appmsg type=57 and return structured refer fields, else None.
 
-    Reuses mcp_server._extract_refer_info + _summarize_refer_content so the
+    Reuses msg_format helpers (_extract_refer_info + _summarize_refer_content) so the
     schema/inner-type-summary logic lives in one place. Empty values are
     dropped to keep the export compact. refer_createtime is returned as int
     (consistent with the top-level `timestamp` field).
     """
     if not content or '<appmsg' not in content:
         return None
-    root = mcp_server._parse_app_message_outer(content)
+    root = msg_format._parse_app_message_outer(content)
     if root is None:
         return None
     appmsg = root.find('.//appmsg')
     if appmsg is None:
         return None
-    app_type = mcp_server._parse_int(
-        mcp_server._collapse_text(appmsg.findtext('type') or ''), 0
+    app_type = msg_format._parse_int(
+        msg_format._collapse_text(appmsg.findtext('type') or ''), 0
     )
     if app_type != 57:
         return None
 
-    info = mcp_server._extract_refer_info(appmsg)
+    info = msg_format._extract_refer_info(appmsg)
     if not info:
         return None
 
@@ -221,10 +222,10 @@ def _extract_refer_extras(content):
         out['reply_text'] = info['reply_text']
     if info['refer_type']:
         out['refer_type'] = info['refer_type']
-        label = mcp_server._REFER_INNER_TYPE_LABEL.get(info['refer_type'])
+        label = msg_format._REFER_INNER_TYPE_LABEL.get(info['refer_type'])
         if label:
             out['refer_type_label'] = label
-    summary = mcp_server._summarize_refer_content(
+    summary = msg_format._summarize_refer_content(
         info['refer_type'], info['refer_content']
     )
     if summary:
@@ -234,7 +235,7 @@ def _extract_refer_extras(content):
         v = info.get(k)
         if v:
             out[k] = v
-    refer_ts = mcp_server._parse_int(info.get('refer_createtime') or '', 0)
+    refer_ts = msg_format._parse_int(info.get('refer_createtime') or '', 0)
     if refer_ts:
         out['refer_createtime'] = refer_ts
     return out or None
@@ -249,11 +250,11 @@ def _extract_content(local_id, local_type, content, ct, chat_username, chat_disp
     expansion, …) can flow through the same channel without changing the
     caller signature.
     """
-    content = mcp_server._decompress_content(content, ct)
+    content = msg_format._decompress_content(content, ct)
     if content is None:
         return None, None
 
-    base, _ = mcp_server._split_msg_type(local_type)
+    base, _ = msg_format._split_msg_type(local_type)
     if base == 1:
         return (content or ""), None
     if base == 43:
@@ -261,7 +262,7 @@ def _extract_content(local_id, local_type, content, ct, chat_username, chat_disp
     if base == 47:
         return _format_sticker_message(content), None
     if base == 49:
-        rendered = mcp_server._format_app_message_text(
+        rendered = msg_format._format_app_message_text(
             content, local_type, False, chat_username, chat_display_name, {}
         )
         transfer = _extract_transfer_extras(content)
@@ -272,7 +273,7 @@ def _extract_content(local_id, local_type, content, ct, chat_username, chat_disp
             return rendered, {'type': 'quote', 'quote': refer}
         return rendered, None
     if base == 50:
-        return mcp_server._format_voip_message_text(content), None
+        return msg_format._format_voip_message_text(content), None
     if base == 10000:
         return _format_system_message(content), None
     if base == 10002:
@@ -281,7 +282,7 @@ def _extract_content(local_id, local_type, content, ct, chat_username, chat_disp
 
 
 def export_chat(chat_name, output_path):
-    ctx = mcp_server._resolve_chat_context(chat_name)
+    ctx = msg_query._resolve_chat_context(chat_name)
     if ctx is None:
         print(f"Could not resolve chat: {chat_name}")
         sys.exit(1)
@@ -295,7 +296,7 @@ def export_chat(chat_name, output_path):
         print(f"No message tables found for {username}")
         sys.exit(1)
 
-    names = mcp_server.get_contact_names()
+    names = get_contact_names()
 
     # Each shard has its own Name2Id table, so we must pair rows with the
     # id_to_username map from their source DB.
@@ -304,8 +305,8 @@ def export_chat(chat_name, output_path):
         db_path = table_info["db_path"]
         table_name = table_info["table_name"]
         with closing(sqlite3.connect(db_path)) as conn:
-            id_to_username = mcp_server._load_name2id_maps(conn)
-            rows = mcp_server._query_messages(conn, table_name, limit=None, oldest_first=True)
+            id_to_username = msg_format._load_name2id_maps(conn)
+            rows = msg_query._query_messages(conn, table_name, limit=None, oldest_first=True)
             for row in rows:
                 all_rows.append((row, id_to_username))
 
