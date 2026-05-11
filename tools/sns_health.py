@@ -283,15 +283,23 @@ def analyze(db_path: str, user: Optional[str], image_dir: Optional[str],
     print()
 
     print(f"--- 3. 字段采集深度 ---")
-    # 每个字段的命中率: parser 自检, 用 N/total = X% 文字表达即可,
-    # 这是 parser coverage QA 而非 "用户活跃度分析", 不画柱状图避免视觉化越界.
-    for f in ("contentDesc", "title", "contentUrl", "location_str", "locationDetail",
-              "videoEncKey", "isPrivate", "finderFeed",
-              "media_description", "media_duration", "media_size",
-              "has_likes", "has_comments"):
+    # parser 自检字段命中率. 注意两类字段的分母不同:
+    #   - 帖子级字段 (contentDesc / title / location ...) 用 total = 帖子数
+    #   - media 级字段 (description / duration / size) 用 media_total = 媒体总数
+    # 单帖可携带多个 media (一组图 9 张), 若 media 级也用 total 作分母会出现
+    # N/total > 100% 的伪命中率, 误导用户判断 parser 健康度.
+    media_total = captured.get("media_total", 0)
+    post_level = ("contentDesc", "title", "contentUrl", "location_str", "locationDetail",
+                  "videoEncKey", "isPrivate", "finderFeed", "has_likes", "has_comments")
+    media_level = ("media_description", "media_duration", "media_size")
+    for f in post_level:
         n = captured[f]
         pct = (100 * n / total) if total else 0
         print(f"  {f:<22}{n:>5}/{total}  ({pct:>3.0f}%)")
+    for f in media_level:
+        n = captured[f]
+        pct = (100 * n / media_total) if media_total else 0
+        print(f"  {f:<22}{n:>5}/{media_total}  ({pct:>3.0f}%)")
     print(f"  likes累计 = {captured['like_total']}, comments累计 = {captured['comment_total']}")
     if captured["parse_error"]:
         print(f"  [!] {captured['parse_error']} posts failed to parse")
