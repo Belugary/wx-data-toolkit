@@ -25,16 +25,28 @@ import sys
 MANUAL_MARKER = "# MANUAL"
 DEFAULT_BLOCKLIST = os.path.join(".git", "info", "pii-blocklist")
 
-DEFAULT_DB_PATHS = [
-    "~/Documents/wechat_decrypted/contact/contact.db",
-]
+DEFAULT_CONTACT_DB = "~/Documents/wechat_decrypted/contact/contact.db"
+DEFAULT_SESSION_DB = "~/Documents/wechat_decrypted/session/session.db"
 
-MIN_CN_LEN = 2
+MIN_CN_LEN_REMARK = 2
+MIN_CN_LEN_OTHER = 3
 MIN_ASCII_LEN = 5
+
+SYSTEM_USERNAMES = frozenset({
+    "filehelper", "newsapp", "fmessage", "floatbottle", "medianote",
+    "weixin", "tmessage", "qmessage", "qqmail", "qqsafe",
+})
 
 GENERIC_SKIP = frozenset({
     "", "test", "test1", "test2", "admin", "user", "null", "none",
     "hello", "world", "demo", "default", "system", "service",
+    "apple", "google", "microsoft", "amazon", "tesla",
+    "simple", "grace", "mirror", "smile", "carol", "angel", "lucky",
+    "happy", "sunny", "summer", "winter", "spring", "tiger", "jason",
+    "david", "kevin", "peter", "jenny", "alice", "vivian", "stella",
+    "shang", "frank", "chris", "brian", "scott", "steve", "sandy",
+    "公众号", "微信转账", "微信支付", "视频号直播", "朋友圈",
+    "李明", "小明", "小王", "小李", "张三", "李四", "王五",
 })
 
 _WXID_RE = re.compile(r"^wxid_[a-zA-Z0-9]+$")
@@ -50,7 +62,7 @@ def _is_ascii_only(s: str) -> bool:
         return False
 
 
-def _should_include(needle: str) -> bool:
+def _should_include(needle: str, is_remark: bool = False) -> bool:
     if not needle or needle.lower() in GENERIC_SKIP:
         return False
     if len(needle) <= 1:
@@ -66,36 +78,59 @@ def _should_include(needle: str) -> bool:
         return False
     if _is_ascii_only(needle):
         return len(needle) >= MIN_ASCII_LEN
-    return len(needle) >= MIN_CN_LEN
+    min_cn = MIN_CN_LEN_REMARK if is_remark else MIN_CN_LEN_OTHER
+    return len(needle) >= min_cn
 
 
-def find_contact_db() -> str | None:
-    for p in DEFAULT_DB_PATHS:
-        expanded = os.path.expanduser(p)
-        if os.path.isfile(expanded):
-            return expanded
-    return None
+def _resolve_db(path: str) -> str | None:
+    expanded = os.path.expanduser(path)
+    return expanded if os.path.isfile(expanded) else None
 
 
-def extract_needles(db_path: str, remark_only: bool = True) -> set[str]:
+def _load_session_usernames(session_db: str) -> set[str]:
+    """Return usernames that have a chat session (i.e. user actually interacted)."""
+    path = _resolve_db(session_db)
+    if not path:
+        return set()
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM SessionTable")
+        users = {r[0] for r in cur.fetchall()}
+        conn.close()
+        return {u for u in users
+                if not u.endswith("@chatroom") and u not in SYSTEM_USERNAMES}
+    except (sqlite3.Error, OSError):
+        return set()
+
+
+def extract_needles(contact_db: str, session_db: str | None = None) -> set[str]:
+    """Extract PII needles from contacts the user actually interacts with.
+
+    Scope: contacts with remark set UNION contacts with a chat session.
+    This covers ~5k real contacts instead of ~115k (mostly public accounts).
+    """
+    db_path = _resolve_db(contact_db)
+    if not db_path:
+        return set()
+
+    session_users = _load_session_usernames(session_db) if session_db else set()
+
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-
-    if remark_only:
-        cur.execute(
-            "SELECT username, nick_name, alias, remark "
-            "FROM contact "
-            "WHERE remark IS NOT NULL AND remark != ''"
-        )
-    else:
-        cur.execute("SELECT username, nick_name, alias, remark FROM contact")
+    cur.execute("SELECT username, nick_name, alias, remark FROM contact")
 
     needles: set[str] = set()
     for username, nick_name, alias, remark in cur.fetchall():
-        for raw in (username, nick_name, alias, remark):
+        has_remark = remark is not None and remark != ""
+        in_session = username in session_users if session_users else False
+        if not has_remark and not in_session:
+            continue
+        for raw, is_remark in ((username, False), (nick_name, False),
+                                (alias, False), (remark, True)):
             if raw:
                 cleaned = raw.strip()
-                if _should_include(cleaned):
+                if _should_include(cleaned, is_remark=is_remark):
                     needles.add(cleaned)
 
     conn.close()
@@ -130,7 +165,7 @@ def write_blocklist(
     with open(blocklist_path, "w", encoding="utf-8") as f:
         f.write("# AUTO-GENERATED — do not edit above the MANUAL marker\n")
         f.write(f"# {len(all_needles)} entries extracted from contact.db\n")
-        f.write(f"# remark-only filter: contacts with remark set\n")
+        f.write(f"# scope: contacts with remark OR chat session\n")
         f.write("\n")
         for n in all_needles:
             f.write(n + "\n")
@@ -191,24 +226,32 @@ def full_scan(blocklist_path: str) -> list[tuple[str, int, str, str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract PII blocklist from contact.db")
-    parser.add_argument("--db", help="Path to contact.db")
+    parser.add_argument("--contact-db", help=f"Path to contact.db (default: {DEFAULT_CONTACT_DB})")
+    parser.add_argument("--session-db", help=f"Path to session.db (default: {DEFAULT_SESSION_DB})")
     parser.add_argument("--blocklist", default=DEFAULT_BLOCKLIST,
                         help=f"Output path (default: {DEFAULT_BLOCKLIST})")
-    parser.add_argument("--all-contacts", action="store_true",
-                        help="Include all contacts, not just those with remark")
     parser.add_argument("--full-scan", action="store_true",
                         help="Scan all tracked files for PII after extraction")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print needles without writing")
     args = parser.parse_args()
 
-    db_path = args.db or find_contact_db()
-    if not db_path or not os.path.isfile(db_path):
-        print("[!] contact.db not found. Use --db to specify path.", file=sys.stderr, flush=True)
+    contact_db = args.contact_db or DEFAULT_CONTACT_DB
+    session_db = args.session_db or DEFAULT_SESSION_DB
+
+    if not _resolve_db(contact_db):
+        print(f"[!] contact.db not found at {contact_db}. Use --contact-db to specify.",
+              file=sys.stderr, flush=True)
         sys.exit(1)
 
-    print(f"[*] Reading {db_path}", flush=True)
-    needles = extract_needles(db_path, remark_only=not args.all_contacts)
+    print(f"[*] contact.db: {os.path.expanduser(contact_db)}", flush=True)
+    if _resolve_db(session_db):
+        print(f"[*] session.db: {os.path.expanduser(session_db)}", flush=True)
+    else:
+        print(f"[*] session.db not found, using remark-only scope", flush=True)
+        session_db = None
+
+    needles = extract_needles(contact_db, session_db)
     print(f"[+] Extracted {len(needles)} unique needles", flush=True)
 
     manual = read_manual_entries(args.blocklist)
