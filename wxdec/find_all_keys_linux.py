@@ -48,7 +48,7 @@ def _is_wechat_process(pid):
             return True
         exe_path = _safe_readlink(f"/proc/{pid}/exe")
         exe_name = os.path.basename(exe_path)
-        # 排除脚本解释器进程（避免匹配 python3.11 wechat-decrypt 等）
+        # 排除脚本解释器进程（避免匹配 python3.11 wx-data-toolkit 等）
         if any(exe_name.lower().startswith(p) for p in _INTERPRETER_PREFIXES):
             return False
         # fallback: exe 名称子串匹配

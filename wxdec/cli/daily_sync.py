@@ -39,7 +39,7 @@ print = functools.partial(print, flush=True)
 
 
 def _project_root():
-    """`wxdec/cli/daily_sync.py` → wechat-decrypt root."""
+    """`wxdec/cli/daily_sync.py` → wx-data-toolkit root."""
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
