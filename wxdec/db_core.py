@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import hashlib
 import atexit
+import pathlib
 from Crypto.Cipher import AES
 from wxdec.config import load_config
 from wxdec.key_utils import get_key_info, key_path_variants, strip_key_metadata
@@ -210,3 +211,20 @@ MSG_DB_KEYS = sorted([
     if any(v.startswith("message/") for v in key_path_variants(k))
     and any(re.search(r"message_\d+\.db$", v) for v in key_path_variants(k))
 ])
+
+
+# ============ Connection helper ============
+
+def open_db_readonly(path):
+    """以 read-only + immutable 模式打开 sqlite 文件。
+
+    本项目里通过 sqlite3 访问的 DB 都是解密后的临时缓存 (DBCache._cache_path)
+    或离线解密产物 (DECRYPTED_DIR) — 都是我们自己写完后只读的快照,告诉
+    sqlite immutable=1 可以让它跳过 WAL/locking 簿记 (轻微性能提升), 并防御
+    性地阻止任何意外写入. 路径里可能含空格 / unicode, 用 pathlib.as_uri() 做
+    正确的 percent-encoding, 避免裸 f-string 拼接出非法 URI.
+
+    调用方仍需自己 close (建议用 contextlib.closing).
+    """
+    uri = pathlib.Path(path).as_uri() + "?mode=ro&immutable=1"
+    return sqlite3.connect(uri, uri=True)

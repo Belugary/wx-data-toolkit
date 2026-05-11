@@ -10,7 +10,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 
-from wxdec.db_core import _cache, MSG_DB_KEYS
+from wxdec.db_core import _cache, MSG_DB_KEYS, open_db_readonly
 from wxdec.contact import resolve_username, get_contact_names, get_contact_full
 from wxdec.msg_format import (
     _format_message_text, _decompress_content, _resolve_sender_label,
@@ -40,19 +40,16 @@ def _find_msg_table_for_user(username):
         path = _cache.get(rel_key)
         if not path:
             continue
-        conn = sqlite3.connect(path)
-        try:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table_name,)
-            ).fetchone()
-            if exists:
-                conn.close()
-                return path, table_name
-        except Exception:
-            pass
-        finally:
-            conn.close()
+        with closing(open_db_readonly(path)) as conn:
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                ).fetchone()
+                if exists:
+                    return path, table_name
+            except Exception:
+                pass
 
     return None, None
 
@@ -69,26 +66,24 @@ def _find_msg_tables_for_user(username):
         path = _cache.get(rel_key)
         if not path:
             continue
-        conn = sqlite3.connect(path)
-        try:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table_name,)
-            ).fetchone()
-            if not exists:
-                continue
-            max_create_time = conn.execute(
-                f"SELECT MAX(create_time) FROM [{table_name}]"
-            ).fetchone()[0] or 0
-            matches.append({
-                'db_path': path,
-                'table_name': table_name,
-                'max_create_time': max_create_time,
-            })
-        except Exception:
-            pass
-        finally:
-            conn.close()
+        with closing(open_db_readonly(path)) as conn:
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                ).fetchone()
+                if not exists:
+                    continue
+                max_create_time = conn.execute(
+                    f"SELECT MAX(create_time) FROM [{table_name}]"
+                ).fetchone()[0] or 0
+                matches.append({
+                    'db_path': path,
+                    'table_name': table_name,
+                    'max_create_time': max_create_time,
+                })
+            except Exception:
+                pass
 
     matches.sort(key=lambda item: item['max_create_time'], reverse=True)
     return matches
@@ -377,7 +372,7 @@ def _collect_chat_history_lines(ctx, names, start_ts=None, end_ts=None, limit=20
 
     for table_ctx in _iter_table_contexts(ctx):
         try:
-            with closing(sqlite3.connect(table_ctx['db_path'])) as conn:
+            with closing(open_db_readonly(table_ctx['db_path'])) as conn:
                 id_to_username = _load_name2id_maps(conn)
                 fetch_offset = 0
                 collected_before_table = len(collected)
@@ -425,7 +420,7 @@ def _collect_chat_search_entries(ctx, names, keyword, start_ts=None, end_ts=None
 
     for db_path, db_contexts in contexts_by_db.items():
         try:
-            with closing(sqlite3.connect(db_path)) as conn:
+            with closing(open_db_readonly(db_path)) as conn:
                 db_entries, db_failures = _collect_search_entries(
                     conn,
                     db_contexts,
@@ -623,7 +618,7 @@ def _search_all_messages(keyword, start_ts, end_ts, start_time, end_time, limit,
             continue
 
         try:
-            with closing(sqlite3.connect(path)) as conn:
+            with closing(open_db_readonly(path)) as conn:
                 contexts = _load_search_contexts_from_db(conn, path, names)
                 db_entries, db_failures = _collect_search_entries(
                     conn,

@@ -7,8 +7,9 @@ Imports from db_core for database access.
 import os
 import re
 import sqlite3
+from contextlib import closing
 
-from wxdec.db_core import _cache, DB_DIR, DECRYPTED_DIR, ALL_KEYS
+from wxdec.db_core import _cache, DB_DIR, DECRYPTED_DIR, ALL_KEYS, open_db_readonly
 
 # ============ Contact caches ============
 
@@ -21,15 +22,12 @@ _self_username = None
 def _load_contacts_from(db_path):
     names = {}
     full = []
-    conn = sqlite3.connect(db_path)
-    try:
+    with closing(open_db_readonly(db_path)) as conn:
         for r in conn.execute("SELECT username, nick_name, remark FROM contact").fetchall():
             uname, nick, remark = r
             display = remark if remark else nick if nick else uname
             names[uname] = display
             full.append({'username': uname, 'nick_name': nick or '', 'remark': remark or ''})
-    finally:
-        conn.close()
     return names, full
 
 
@@ -130,50 +128,49 @@ def _load_contact_tags():
         return {}
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = open_db_readonly(db_path)
     except Exception:
         return {}
 
-    try:
-        # 1. 加载标签定义
+    with closing(conn):
         try:
-            label_rows = conn.execute(
-                "SELECT label_id_, label_name_, sort_order_ FROM contact_label ORDER BY sort_order_"
+            # 1. 加载标签定义
+            try:
+                label_rows = conn.execute(
+                    "SELECT label_id_, label_name_, sort_order_ FROM contact_label ORDER BY sort_order_"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return {}
+            if not label_rows:
+                return {}
+
+            labels = {}
+            for lid, lname, sort_order in label_rows:
+                labels[lid] = {'name': lname, 'sort_order': sort_order, 'members': []}
+
+            # 2. 扫描联系人的标签关联
+            names = get_contact_names()
+            rows = conn.execute(
+                "SELECT username, extra_buffer FROM contact WHERE extra_buffer IS NOT NULL"
             ).fetchall()
-        except sqlite3.OperationalError:
-            return {}
-        if not label_rows:
-            return {}
 
-        labels = {}
-        for lid, lname, sort_order in label_rows:
-            labels[lid] = {'name': lname, 'sort_order': sort_order, 'members': []}
-
-        # 2. 扫描联系人的标签关联
-        names = get_contact_names()
-        rows = conn.execute(
-            "SELECT username, extra_buffer FROM contact WHERE extra_buffer IS NOT NULL"
-        ).fetchall()
-
-        for username, buf in rows:
-            label_str = _extract_pb_field_30(buf)
-            if not label_str:
-                continue
-            display = names.get(username, username)
-            for lid_s in label_str.split(','):
-                try:
-                    lid = int(lid_s.strip())
-                except (ValueError, AttributeError):
+            for username, buf in rows:
+                label_str = _extract_pb_field_30(buf)
+                if not label_str:
                     continue
-                if lid in labels:
-                    labels[lid]['members'].append({'username': username, 'display_name': display})
+                display = names.get(username, username)
+                for lid_s in label_str.split(','):
+                    try:
+                        lid = int(lid_s.strip())
+                    except (ValueError, AttributeError):
+                        continue
+                    if lid in labels:
+                        labels[lid]['members'].append({'username': username, 'display_name': display})
 
-        _contact_tags = labels
-        return _contact_tags
-    except Exception:
-        return {}
-    finally:
-        conn.close()
+            _contact_tags = labels
+            return _contact_tags
+        except Exception:
+            return {}
 
 
 def resolve_username(chat_name):

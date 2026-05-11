@@ -649,7 +649,7 @@ class SearchMessagesTests(unittest.TestCase):
         with patch.object(mcp_server, "_cache", fake_cache), patch.object(
             mcp_server, "get_contact_names", return_value={}
         ), patch.object(
-            mcp_server.sqlite3, "connect", return_value=fake_conn
+            mcp_server, "open_db_readonly", return_value=fake_conn
         ):
             with self.assertRaisesRegex(sqlite3.OperationalError, "boom"):
                 mcp_server.get_recent_sessions()
@@ -675,7 +675,7 @@ class SearchMessagesTests(unittest.TestCase):
         with patch.object(mcp_server, "_cache", fake_cache), patch.object(
             mcp_server, "get_contact_names", return_value={}
         ), patch.object(
-            mcp_server.sqlite3, "connect", return_value=fake_conn
+            mcp_server, "open_db_readonly", return_value=fake_conn
         ):
             with self.assertRaisesRegex(sqlite3.OperationalError, "boom"):
                 mcp_server.get_new_messages()

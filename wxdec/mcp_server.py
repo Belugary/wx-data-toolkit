@@ -23,6 +23,7 @@ from wxdec.db_core import (
     DBCache, _cache, _cfg,
     SCRIPT_DIR, DB_DIR, KEYS_FILE, DECRYPTED_DIR, WECHAT_BASE_DIR, DECODED_IMAGE_DIR, ALL_KEYS,
     MSG_DB_KEYS,
+    open_db_readonly,
 )
 from wxdec.contact import (
     _contact_names, _contact_full, _contact_tags, _self_username,
@@ -107,7 +108,7 @@ def get_recent_sessions(limit: int = 20) -> str:
         return "错误: 无法解密 session.db"
 
     names = get_contact_names()
-    with closing(sqlite3.connect(path)) as conn:
+    with closing(open_db_readonly(path)) as conn:
         rows = conn.execute("""
             SELECT username, unread_count, summary, last_timestamp,
                    last_msg_type, last_msg_sender, last_sender_display_name
@@ -402,7 +403,7 @@ def get_new_messages() -> str:
         return "错误: 无法解密 session.db"
 
     names = get_contact_names()
-    with closing(sqlite3.connect(path)) as conn:
+    with closing(open_db_readonly(path)) as conn:
         rows = conn.execute("""
             SELECT username, unread_count, summary, last_timestamp,
                    last_msg_type, last_msg_sender, last_sender_display_name
@@ -563,7 +564,7 @@ def decode_file_message(chat_name: str, local_id: int, create_time: int = 0) -> 
     for shard in shards:
         if not _is_safe_msg_table_name(shard['table_name']):
             continue
-        with closing(sqlite3.connect(shard['db_path'])) as conn:
+        with closing(open_db_readonly(shard['db_path'])) as conn:
             if create_time:
                 candidate_row = conn.execute(
                     f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
@@ -834,7 +835,7 @@ def decode_record_item(chat_name: str, local_id: int, item_index: int, create_ti
     for shard in shards:
         if not _is_safe_msg_table_name(shard['table_name']):
             continue
-        with closing(sqlite3.connect(shard['db_path'])) as conn:
+        with closing(open_db_readonly(shard['db_path'])) as conn:
             if create_time:
                 candidate_row = conn.execute(
                     f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
@@ -1117,7 +1118,7 @@ def decode_transfer(chat_name: str, local_id: int, create_time: int = 0) -> str:
     for shard in shards:
         if not _is_safe_msg_table_name(shard['table_name']):
             continue
-        with closing(sqlite3.connect(shard['db_path'])) as conn:
+        with closing(open_db_readonly(shard['db_path'])) as conn:
             if create_time:
                 candidate_row = conn.execute(
                     f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
@@ -1261,7 +1262,7 @@ def decode_refer(chat_name: str, local_id: int, create_time: int = 0) -> str:
     for shard in shards:
         if not _is_safe_msg_table_name(shard['table_name']):
             continue
-        with closing(sqlite3.connect(shard['db_path'])) as conn:
+        with closing(open_db_readonly(shard['db_path'])) as conn:
             if create_time:
                 candidate_row = conn.execute(
                     f"SELECT local_type, create_time, message_content, WCDB_CT_message_content "
@@ -1465,7 +1466,7 @@ def _get_chat_name_id(conn, username):
 def _fetch_voice_row(username, local_id):
     """遍历所有 media DB 分片，返回 (voice_data, create_time)；找不到返回 None。"""
     for media_db in _iter_media_db_paths():
-        with closing(sqlite3.connect(media_db)) as conn:
+        with closing(open_db_readonly(media_db)) as conn:
             chat_name_id = _get_chat_name_id(conn, username)
             if chat_name_id is None:
                 continue
@@ -1540,7 +1541,7 @@ def get_voice_messages(chat_name: str, limit: int = 20, offset: int = 0, start_t
 
     rows = []
     for media_db in _iter_media_db_paths():
-        with closing(sqlite3.connect(media_db)) as conn:
+        with closing(open_db_readonly(media_db)) as conn:
             chat_name_id = _get_chat_name_id(conn, username)
             if chat_name_id is None:
                 continue

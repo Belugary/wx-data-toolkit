@@ -22,6 +22,7 @@ import glob
 import hashlib
 import sqlite3
 import struct
+from contextlib import closing
 
 # V2 格式完整 magic (6 bytes)
 V2_MAGIC = b'\x07\x08\x56\x32'       # 前 4 字节用于快速检测
@@ -467,29 +468,30 @@ class ImageResolver:
         if not path:
             return None
 
-        conn = sqlite3.connect(path)
-        try:
-            chat_row = conn.execute(
-                "SELECT rowid FROM ChatName2Id WHERE user_name = ?",
-                (username,)
-            ).fetchone()
-            if not chat_row:
-                return None
-            chat_id = chat_row[0]
+        # lazy import 避免 decode_image.py 单文件 CLI 触发 db_core 的 config 加载
+        from wxdec.db_core import open_db_readonly
 
-            row = conn.execute(
-                "SELECT packed_info FROM MessageResourceInfo "
-                "WHERE chat_id = ? AND message_local_id = ? "
-                "AND (message_local_type = 3 OR message_local_type % 4294967296 = 3) "
-                "ORDER BY message_create_time DESC LIMIT 1",
-                (chat_id, local_id)
-            ).fetchone()
-            if row and row[0]:
-                return extract_md5_from_packed_info(row[0])
-        except Exception:
-            pass
-        finally:
-            conn.close()
+        with closing(open_db_readonly(path)) as conn:
+            try:
+                chat_row = conn.execute(
+                    "SELECT rowid FROM ChatName2Id WHERE user_name = ?",
+                    (username,)
+                ).fetchone()
+                if not chat_row:
+                    return None
+                chat_id = chat_row[0]
+
+                row = conn.execute(
+                    "SELECT packed_info FROM MessageResourceInfo "
+                    "WHERE chat_id = ? AND message_local_id = ? "
+                    "AND (message_local_type = 3 OR message_local_type % 4294967296 = 3) "
+                    "ORDER BY message_create_time DESC LIMIT 1",
+                    (chat_id, local_id)
+                ).fetchone()
+                if row and row[0]:
+                    return extract_md5_from_packed_info(row[0])
+            except Exception:
+                pass
 
         return None
 
@@ -580,19 +582,19 @@ class ImageResolver:
         where_sql = ' AND '.join(clauses)
         params.append(limit)
 
-        conn = sqlite3.connect(db_path)
-        try:
-            rows = conn.execute(f"""
-                SELECT local_id, create_time
-                FROM [{table_name}]
-                WHERE {where_sql}
-                ORDER BY create_time DESC
-                LIMIT ?
-            """, params).fetchall()
-        except Exception as e:
-            conn.close()
-            return []
-        conn.close()
+        from wxdec.db_core import open_db_readonly
+
+        with closing(open_db_readonly(db_path)) as conn:
+            try:
+                rows = conn.execute(f"""
+                    SELECT local_id, create_time
+                    FROM [{table_name}]
+                    WHERE {where_sql}
+                    ORDER BY create_time DESC
+                    LIMIT ?
+                """, params).fetchall()
+            except Exception:
+                return []
 
         results = []
         for local_id, create_time in rows:
