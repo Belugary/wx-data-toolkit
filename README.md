@@ -63,12 +63,14 @@ claude mcp add wechat -- python /path/to/wx-data-toolkit/wxdec/mcp_server.py
 | 工具 | 说明 |
 |---|---|
 | `get_recent_sessions` | 最近会话列表 |
-| `get_chat_history(chat_name)` | 指定联系人的聊天历史 |
-| `search_messages(keyword)` | 全聊天记录搜索 |
+| `get_chat_history(chat_name)` | 聊天历史，支持时间范围、分页、按类型过滤（`msg_types`） |
+| `search_messages(keyword)` | 全聊天记录搜索，支持多聊天对象 |
 | `get_contacts()` | 联系人列表 |
 | `get_contact_tags()` / `get_tag_members(tag_name)` | 标签与成员 |
 | `get_new_messages()` | 自上次调用以来的新消息 |
-| `decode_voice` / `transcribe_voice` | 语音解码与转录 |
+| `get_chat_images` / `get_voice_messages` | 列出图片/语音消息，支持时间范围和分页 |
+| `decode_image` / `decode_voice` / `transcribe_voice` | 图片解密、语音解码与转录 |
+| `decode_file_message` | 定位文件消息（PDF/docx 等）的本地副本 |
 
 语音转录默认使用本地 Whisper, 数据留在本机。在 `config.json` 设 `"transcription_backend": "openai"` + `"openai_api_key"` 可切换到 OpenAI API(更快, 但**语音会上传至 OpenAI**)。
 
