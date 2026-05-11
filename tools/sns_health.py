@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """SNS coverage health report — what we have vs what's possible to capture.
 
+Scope: export-completeness diagnosis only. This is NOT a behavior-analysis or
+activity-statistics tool — we report which posts / fields / media were captured
+vs missed, never frame counts as "how active was the user".
+
 Inspects the exported sns.db plus on-disk media outputs and prints:
-  1. Total posts by year/month (bar chart) — spot zero-post months
-  2. Field capture depth — which fields the parser is filling in
-  3. Media download coverage — image / video on-disk vs in-XML
-  4. Data integrity (key insight): SnsUserTimeLineBreakFlagV2 tells us how far
-     back the local DB was paginated. Posts before the break_flag=1 anchor
-     are NOT guaranteed to be complete — only what the user happened to
-     scroll through is stored.
-  5. Long gaps (>30 days between consecutive posts) — could be either real
-     inactivity or data loss; the script flags both for human review.
+  1. Capture overview — total post count, time span, kind composition (input
+     into how much decrypt-media work is pending)
+  2. Media download coverage — image / video on-disk vs referenced in XML
+  3. Field capture depth — which XML fields the parser is filling in
+  4. Calendar coverage — which months in span have zero captured posts
+     (signal for "did we miss data here?")
+  5. Long gaps (>30 days between consecutive posts) — flagged for human
+     review since SNS media expires server-side within days
+  6. Data integrity: SnsUserTimeLineBreakFlagV2 tells us how far back the
+     local DB was paginated. Posts before the break_flag=1 anchor are NOT
+     guaranteed to be complete — only what the user happened to scroll
+     through is stored.
+  7. Actionable recommendations for re-pulling missing data
 
 Usage:
   python tools/sns_health.py [--user WXID] [--db PATH]
@@ -47,19 +55,18 @@ def _next_month(dt: datetime) -> datetime:
     return datetime(dt.year + (dt.month == 12), (dt.month % 12) + 1, 1, tzinfo=timezone.utc)
 
 
-def render_monthly_histogram(month_counts: dict[str, int],
-                             earliest: datetime, latest: datetime) -> list[str]:
-    lines = [f'{"month":<10}{"count":<8}bar']
+def find_zero_post_months(month_counts: dict[str, int],
+                          earliest: datetime, latest: datetime) -> list[str]:
+    """Walk the calendar from earliest to latest and list months with zero captured posts."""
+    zero = []
     cur = datetime(earliest.year, earliest.month, 1, tzinfo=timezone.utc)
     end = datetime(latest.year, latest.month, 1, tzinfo=timezone.utc)
     while cur <= end:
         ym = f"{cur.year}-{cur.month:02d}"
-        n = month_counts.get(ym, 0)
-        bar = "#" * min(n, 40)
-        marker = "  <-- ZERO" if n == 0 else ""
-        lines.append(f"{ym:<10}{n:<8}{bar}{marker}")
+        if month_counts.get(ym, 0) == 0:
+            zero.append(ym)
         cur = _next_month(cur)
-    return lines
+    return zero
 
 
 def find_long_gaps(times: list[int], threshold_days: int = 30) -> list[tuple[datetime, datetime, int]]:
@@ -276,34 +283,31 @@ def analyze(db_path: str, user: Optional[str], image_dir: Optional[str],
     print()
 
     print(f"--- 3. 字段采集深度 ---")
+    # 每个字段的命中率: parser 自检, 用 N/total = X% 文字表达即可,
+    # 这是 parser coverage QA 而非 "用户活跃度分析", 不画柱状图避免视觉化越界.
     for f in ("contentDesc", "title", "contentUrl", "location_str", "locationDetail",
               "videoEncKey", "isPrivate", "finderFeed",
               "media_description", "media_duration", "media_size",
               "has_likes", "has_comments"):
         n = captured[f]
-        bar = "#" * min(int(40 * n / total), 40) if total else ""
-        print(f"  {f:<22}{n:>5}/{total}   {bar}")
+        pct = (100 * n / total) if total else 0
+        print(f"  {f:<22}{n:>5}/{total}  ({pct:>3.0f}%)")
     print(f"  likes累计 = {captured['like_total']}, comments累计 = {captured['comment_total']}")
     if captured["parse_error"]:
         print(f"  [!] {captured['parse_error']} posts failed to parse")
     print()
 
     if times:
-        print(f"--- 4. 月度分布(< 1 帖月份是定向采集线索) ---")
-        for line in render_monthly_histogram(month_counts, earliest, latest):
-            print(f"  {line}")
-        zero_months = [
-            ym for ym, n in month_counts.items() if n == 0
-        ]
-        zero_in_span = []
-        cur = datetime(earliest.year, earliest.month, 1, tzinfo=timezone.utc)
-        end = datetime(latest.year, latest.month, 1, tzinfo=timezone.utc)
-        while cur <= end:
-            ym = f"{cur.year}-{cur.month:02d}"
-            if month_counts.get(ym, 0) == 0:
-                zero_in_span.append(ym)
-            cur = _next_month(cur)
-        print(f"\n  zero-post months in range: {len(zero_in_span)}")
+        print(f"--- 4. 日历覆盖(零帖月份是定向采集线索) ---")
+        # 只输出 "零帖月份" 这个诊断信号, 不画每月分布柱状图 —— 月度活跃曲线
+        # 属于行为分析端, 不在本工具范围. 我们只关心 "哪些月份没数据可能漏采集".
+        zero_in_span = find_zero_post_months(month_counts, earliest, latest)
+        total_months = (latest.year - earliest.year) * 12 + (latest.month - earliest.month) + 1
+        captured_months = total_months - len(zero_in_span)
+        print(f"  时间跨度: {total_months} 个月, 有帖月份 {captured_months}, 零帖月份 {len(zero_in_span)}")
+        if zero_in_span:
+            # 列出零帖月份, 给用户判断 "这些月份是真的没发, 还是导出漏了"
+            print(f"  零帖月份: {', '.join(zero_in_span)}")
     print()
 
     # Long gaps
