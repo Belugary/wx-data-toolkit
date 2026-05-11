@@ -42,6 +42,3 @@ docs/internal/
 
 # 本地机器配置 (含 venv 绝对路径，机器相关)
 .mcp.json
-
-# 个人应用脚本 (非工具集职责，作为 wxdec 的下游消费者)
-scripts/watch_messages.py
