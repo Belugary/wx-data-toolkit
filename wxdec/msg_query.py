@@ -139,7 +139,7 @@ def _parse_time_range(start_time='', end_time=''):
 
 # ============ Query building ============
 
-def _build_message_filters(start_ts=None, end_ts=None, keyword=''):
+def _build_message_filters(start_ts=None, end_ts=None, keyword='', type_filter=None):
     clauses = []
     params = []
     if start_ts is not None:
@@ -151,14 +151,18 @@ def _build_message_filters(start_ts=None, end_ts=None, keyword=''):
     if keyword:
         clauses.append('message_content LIKE ?')
         params.append(f'%{keyword}%')
+    if type_filter:
+        placeholders = ','.join('?' * len(type_filter))
+        clauses.append(f'(local_type & 0xFFFF) IN ({placeholders})')
+        params.extend(type_filter)
     return clauses, params
 
 
-def _query_messages(conn, table_name, start_ts=None, end_ts=None, keyword='', limit=20, offset=0, oldest_first=False):
+def _query_messages(conn, table_name, start_ts=None, end_ts=None, keyword='', limit=20, offset=0, oldest_first=False, type_filter=None):
     if not _is_safe_msg_table_name(table_name):
         raise ValueError(f'非法消息表名: {table_name}')
 
-    clauses, params = _build_message_filters(start_ts, end_ts, keyword)
+    clauses, params = _build_message_filters(start_ts, end_ts, keyword, type_filter=type_filter)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ''
     order = 'ASC' if oldest_first else 'DESC'
     sql = f"""
@@ -365,7 +369,7 @@ def _page_ranked_entries(entries, limit, offset, oldest_first=False):
 
 # ============ Collection functions ============
 
-def _collect_chat_history_lines(ctx, names, start_ts=None, end_ts=None, limit=20, offset=0, oldest_first=False):
+def _collect_chat_history_lines(ctx, names, start_ts=None, end_ts=None, limit=20, offset=0, oldest_first=False, type_filter=None):
     collected = []
     failures = []
     candidate_limit = _candidate_page_size(limit, offset)
@@ -387,6 +391,7 @@ def _collect_chat_history_lines(ctx, names, start_ts=None, end_ts=None, limit=20
                         limit=batch_size,
                         offset=fetch_offset,
                         oldest_first=oldest_first,
+                        type_filter=type_filter,
                     )
                     if not rows:
                         break
@@ -537,7 +542,10 @@ def _search_single_chat(ctx, keyword, start_ts, end_ts, start_time, end_time, li
         header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
     if failures:
         header += "\n查询失败: " + "；".join(failures)
-    return header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    result = header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    if len(paged) >= limit:
+        result += f"\n\n（可能还有更多结果，可设 offset={offset + limit} 继续查询）"
+    return result
 
 
 def _search_multiple_chats(chat_names, keyword, start_ts, end_ts, start_time, end_time, limit, offset):
@@ -597,7 +605,10 @@ def _search_multiple_chats(chat_names, keyword, start_ts, end_ts, start_time, en
         header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
     if notes:
         header += "\n" + "\n".join(notes)
-    return header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    result = header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    if len(paged) >= limit:
+        result += f"\n\n（可能还有更多结果，可设 offset={offset + limit} 继续查询）"
+    return result
 
 
 def _search_all_messages(keyword, start_ts, end_ts, start_time, end_time, limit, offset):
@@ -643,4 +654,7 @@ def _search_all_messages(keyword, start_ts, end_ts, start_time, end_time, limit,
         header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
     if failures:
         header += "\n查询失败: " + "；".join(failures)
-    return header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    result = header + ":\n\n" + "\n\n".join(item[1] for item in paged)
+    if len(paged) >= limit:
+        result += f"\n\n（可能还有更多结果，可设 offset={offset + limit} 继续查询）"
+    return result

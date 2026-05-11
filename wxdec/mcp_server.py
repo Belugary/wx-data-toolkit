@@ -74,6 +74,25 @@ mcp = FastMCP("wechat", instructions="查询微信消息、联系人等数据")
 # 新消息追踪
 _last_check_state = {}  # {username: last_timestamp}
 
+_MSG_TYPE_MAP = {
+    'text': [1],
+    'image': [3],
+    'voice': [34],
+    'namecard': [42],
+    'video': [43],
+    'emoji': [47],
+    'location': [48],
+    'app': [49],
+    'voip': [50],
+    'system': [10000],
+}
+
+
+def _pagination_hint(count, limit, offset):
+    if count >= limit:
+        return f"\n\n（可能还有更多结果，可设 offset={offset + limit} 继续查询）"
+    return ""
+
 
 @mcp.tool()
 def get_recent_sessions(limit: int = 20) -> str:
@@ -134,7 +153,7 @@ def get_recent_sessions(limit: int = 20) -> str:
 
 
 @mcp.tool()
-def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_time: str = "", end_time: str = "", oldest_first: bool = False) -> str:
+def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_time: str = "", end_time: str = "", oldest_first: bool = False, msg_types: list[str] | None = None) -> str:
     """获取指定聊天的消息记录。
 
     Args:
@@ -144,12 +163,25 @@ def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_tim
         start_time: 起始时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
         end_time: 结束时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
         oldest_first: 为 True 时返回最早的消息（默认 False 返回最新消息）
+        msg_types: 按消息类型过滤，可选值: text, image, voice, video, file(=app), emoji, location, namecard, voip, system。
+            传 None 或不传表示不过滤
     """
     try:
         _validate_pagination(limit, offset, limit_max=None)
         start_ts, end_ts = _parse_time_range(start_time, end_time)
     except ValueError as e:
         return f"错误: {e}"
+
+    type_filter = None
+    if msg_types:
+        type_filter = []
+        for t in msg_types:
+            key = t.strip().lower()
+            if key == 'file':
+                key = 'app'
+            if key not in _MSG_TYPE_MAP:
+                return f"错误: 未知消息类型 \"{t}\"。可选: {', '.join(sorted(_MSG_TYPE_MAP))}"
+            type_filter.extend(_MSG_TYPE_MAP[key])
 
     ctx = _resolve_chat_context(chat_name)
     if not ctx:
@@ -166,6 +198,7 @@ def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_tim
         limit=limit,
         offset=offset,
         oldest_first=oldest_first,
+        type_filter=type_filter,
     )
 
     if not lines:
@@ -178,9 +211,11 @@ def get_chat_history(chat_name: str, limit: int = 50, offset: int = 0, start_tim
         header += " [群聊]"
     if start_time or end_time:
         header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+    if msg_types:
+        header += f"\n类型过滤: {', '.join(msg_types)}"
     if failures:
         header += "\n查询失败: " + "；".join(failures)
-    return header + ":\n\n" + "\n".join(lines)
+    return header + ":\n\n" + "\n".join(lines) + _pagination_hint(len(lines), limit, offset)
 
 
 @mcp.tool()
@@ -275,6 +310,7 @@ def get_contacts(query: str = "", limit: int = 50) -> str:
     else:
         filtered = contacts
 
+    total = len(filtered)
     filtered = filtered[:limit]
 
     if not filtered:
@@ -292,7 +328,10 @@ def get_contacts(query: str = "", limit: int = 50) -> str:
     header = f"找到 {len(filtered)} 个联系人"
     if query:
         header += f"（搜索: {query}）"
-    return header + ":\n\n" + "\n".join(lines)
+    result = header + ":\n\n" + "\n".join(lines)
+    if total > limit:
+        result += f"\n\n（共 {total} 个匹配，当前仅显示前 {limit} 个，可增大 limit 查看更多）"
+    return result
 
 
 @mcp.tool()
@@ -1332,7 +1371,7 @@ def decode_refer(chat_name: str, local_id: int, create_time: int = 0) -> str:
 
 
 @mcp.tool()
-def get_chat_images(chat_name: str, limit: int = 20) -> str:
+def get_chat_images(chat_name: str, limit: int = 20, offset: int = 0, start_time: str = "", end_time: str = "") -> str:
     """列出某个聊天中的图片消息。
 
     返回图片的时间、local_id、MD5、文件大小等信息。
@@ -1341,7 +1380,16 @@ def get_chat_images(chat_name: str, limit: int = 20) -> str:
     Args:
         chat_name: 聊天对象的名字、备注名或wxid
         limit: 返回数量，默认20
+        offset: 分页偏移量，默认0
+        start_time: 起始时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
+        end_time: 结束时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
     """
+    try:
+        _validate_pagination(limit, offset)
+        start_ts, end_ts = _parse_time_range(start_time, end_time)
+    except ValueError as e:
+        return f"错误: {e}"
+
     username = resolve_username(chat_name)
     if not username:
         return f"找不到聊天对象: {chat_name}"
@@ -1349,16 +1397,27 @@ def get_chat_images(chat_name: str, limit: int = 20) -> str:
     names = get_contact_names()
     display_name = names.get(username, username)
 
-    db_path, table_name = _find_msg_table_for_user(username)
-    if not db_path:
+    shards = _find_msg_tables_for_user(username)
+    if not shards:
         return f"找不到 {display_name} 的消息记录"
 
-    images = _image_resolver.list_chat_images(db_path, table_name, username, limit)
-    if not images:
+    candidate_limit = limit + offset
+    all_images = []
+    for shard in shards:
+        shard_images = _image_resolver.list_chat_images(
+            shard['db_path'], shard['table_name'], username,
+            limit=candidate_limit, start_ts=start_ts, end_ts=end_ts,
+        )
+        all_images.extend(shard_images)
+
+    if not all_images:
         return f"{display_name} 无图片消息"
 
+    all_images.sort(key=lambda img: img['create_time'], reverse=True)
+    paged = all_images[offset:offset + limit]
+
     lines = []
-    for img in images:
+    for img in paged:
         time_str = datetime.fromtimestamp(img['create_time']).strftime('%Y-%m-%d %H:%M')
         line = f"[{time_str}] local_id={img['local_id']}"
         if img.get('md5'):
@@ -1370,7 +1429,10 @@ def get_chat_images(chat_name: str, limit: int = 20) -> str:
             line += "  (无资源信息)"
         lines.append(line)
 
-    return f"{display_name} 的 {len(lines)} 张图片:\n\n" + "\n".join(lines)
+    header = f"{display_name} 的 {len(lines)} 张图片（offset={offset}, limit={limit}）"
+    if start_time or end_time:
+        header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+    return header + ":\n\n" + "\n".join(lines) + _pagination_hint(len(lines), limit, offset)
 
 
 # ============ 语音解密 ============
@@ -1440,7 +1502,7 @@ def _silk_to_wav(voice_data, create_time, username, local_id):
 
 
 @mcp.tool()
-def get_voice_messages(chat_name: str, limit: int = 20) -> str:
+def get_voice_messages(chat_name: str, limit: int = 20, offset: int = 0, start_time: str = "", end_time: str = "") -> str:
     """列出某个聊天中的语音消息。
 
     返回语音的时间、local_id 和大小，可配合 decode_voice 工具解码。
@@ -1448,7 +1510,16 @@ def get_voice_messages(chat_name: str, limit: int = 20) -> str:
     Args:
         chat_name: 聊天对象的名字、备注名或wxid
         limit: 返回数量，默认20
+        offset: 分页偏移量，默认0
+        start_time: 起始时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
+        end_time: 结束时间，支持 YYYY-MM-DD / YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS
     """
+    try:
+        _validate_pagination(limit, offset)
+        start_ts, end_ts = _parse_time_range(start_time, end_time)
+    except ValueError as e:
+        return f"错误: {e}"
+
     username = resolve_username(chat_name)
     if not username:
         return f"找不到聊天对象: {chat_name}"
@@ -1459,31 +1530,47 @@ def get_voice_messages(chat_name: str, limit: int = 20) -> str:
     if not MEDIA_DB_KEYS:
         return "找不到 media DB"
 
-    # 从每个分片各取最多 limit 条后合并再截断：分片若有时间重叠也不会漏最新消息
+    candidate_limit = limit + offset
+    clauses = ['chat_name_id = ?']
+    if start_ts is not None:
+        clauses.append('create_time >= ?')
+    if end_ts is not None:
+        clauses.append('create_time <= ?')
+    where_sql = ' AND '.join(clauses)
+
     rows = []
     for media_db in _iter_media_db_paths():
         with closing(sqlite3.connect(media_db)) as conn:
             chat_name_id = _get_chat_name_id(conn, username)
             if chat_name_id is None:
                 continue
+            params = [chat_name_id]
+            if start_ts is not None:
+                params.append(start_ts)
+            if end_ts is not None:
+                params.append(end_ts)
+            params.append(candidate_limit)
             rows.extend(conn.execute(
-                "SELECT local_id, create_time, length(voice_data) FROM VoiceInfo "
-                "WHERE chat_name_id = ? ORDER BY create_time DESC LIMIT ?",
-                (chat_name_id, limit),
+                f"SELECT local_id, create_time, length(voice_data) FROM VoiceInfo "
+                f"WHERE {where_sql} ORDER BY create_time DESC LIMIT ?",
+                params,
             ).fetchall())
 
     if not rows:
         return f"{display_name} 无语音消息"
 
     rows.sort(key=lambda r: r[1], reverse=True)
-    rows = rows[:limit]
+    paged = rows[offset:offset + limit]
 
     lines = []
-    for local_id, create_time, size in rows:
+    for local_id, create_time, size in paged:
         time_str = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M')
         lines.append(f"[{time_str}] local_id={local_id}  {size/1024:.0f}KB")
 
-    return f"{display_name} 的 {len(lines)} 条语音消息:\n\n" + "\n".join(lines)
+    header = f"{display_name} 的 {len(lines)} 条语音消息（offset={offset}, limit={limit}）"
+    if start_time or end_time:
+        header += f"\n时间范围: {start_time or '最早'} ~ {end_time or '最新'}"
+    return header + ":\n\n" + "\n".join(lines) + _pagination_hint(len(lines), limit, offset)
 
 
 @mcp.tool()

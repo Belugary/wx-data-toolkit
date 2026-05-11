@@ -567,17 +567,28 @@ class ImageResolver:
             'size': os.path.getsize(final_path),
         }
 
-    def list_chat_images(self, db_path, table_name, username, limit=20):
+    def list_chat_images(self, db_path, table_name, username, limit=20, start_ts=None, end_ts=None):
         """列出某个聊天中的所有图片消息"""
+        clauses = ['local_type = 3']
+        params = []
+        if start_ts is not None:
+            clauses.append('create_time >= ?')
+            params.append(start_ts)
+        if end_ts is not None:
+            clauses.append('create_time <= ?')
+            params.append(end_ts)
+        where_sql = ' AND '.join(clauses)
+        params.append(limit)
+
         conn = sqlite3.connect(db_path)
         try:
             rows = conn.execute(f"""
                 SELECT local_id, create_time
                 FROM [{table_name}]
-                WHERE local_type = 3
+                WHERE {where_sql}
                 ORDER BY create_time DESC
                 LIMIT ?
-            """, (limit,)).fetchall()
+            """, params).fetchall()
         except Exception as e:
             conn.close()
             return []
