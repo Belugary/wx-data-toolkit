@@ -41,74 +41,40 @@ sudo ./bin/find_all_keys_macos
 
 ## 功能
 
-**导出聊天数据库** — `python main.py decrypt` 把全部对话导出到 `decrypted/`。 加 `--with-wal` 可以把当天最新写入的数据一起合进来; `--db-dir` / `--keys-file` / `--out-dir` 可以覆盖默认路径。
+**导出聊天数据库** — `python main.py decrypt` 全部对话导出到 `decrypted/`。`--with-wal` 合并当天最新数据; `--db-dir` / `--keys-file` / `--out-dir` 覆盖默认路径。
 
-**导出图片** — `python main.py decode-images` 把图片整理成 `<会话>/<年-月>/<文件名>` 的目录结构, 直接打开就能看。 聊天里的小视频 (wxgf 格式) 会以 `.hevc` 裸流形式落盘, 用 ffmpeg 可以再封装成 mp4。
+**导出图片** — `python main.py decode-images` 按 `<会话>/<年-月>/<文件名>` 整理。wxgf 小视频以 `.hevc` 裸流落盘, ffmpeg 可封装为 mp4。
 
-**导出朋友圈** — `python -m wxdec.cli.decrypt_sns --start YYYY-MM-DD --decrypt-media` 整理朋友圈到 `sns/` 目录。 注意:**朋友圈的图片/视频在服务端只保留几天**, 过期就拿不到了; 加上 `--decrypt-media` 才会在窗口期内把媒体文件落到本地, 之后就一直可用。
+**导出朋友圈** — `python -m wxdec.cli.decrypt_sns --start YYYY-MM-DD --decrypt-media` 整理到 `sns/`。注意: **朋友圈媒体在服务端只保留几天**, `--decrypt-media` 在窗口期内把文件落到本地。更多朋友圈工具(视频补还原、采集度报告、本地缓存整理)见 `tools/` 目录。
 
-输出 JSON 包含每条朋友圈的完整 metadata: `contentDesc / location / locationDetail / media[] (含 description / videoDuration / size) / videoEncKey / isPrivate / finderFeed (视频号转发) / likes / comments`。 互动数据(点赞、评论)从 sns.db 的 `SnsMessage_tmp3` 表读取。
+**实时消息流** — `python main.py` 启动 `http://localhost:5678`, 浏览器看新消息推送, 图片内联预览, ~100ms 延迟。
 
-**朋友圈视频批量补还原** — 下载朋友圈视频时若之前缺失访问凭据, 视频会以 `.mp4.enc` 形式临时落盘。 拿到完整 `sns.db` 后用以下命令批量整理:
+**每日定时同步** — `python -m wxdec.cli.daily_sync` 一次跑完导出 + 图片 + 最近 7 天朋友圈, 配 launchd / systemd / schtasks 当定时任务。
 
-```bash
-python tools/decrypt_existing_videos.py --enc-dir <存放 .mp4.enc 的目录> \
-    --sns-db ~/Documents/wechat_decrypted/sns/sns.db
-```
-
-视频访问凭据(post 级别 `<enc key>` 字段)从 sns.db XML 中读取, 不依赖网络。
-
-**朋友圈采集度报告** — `python tools/sns_health.py --user <你的 wxid>` 输出当前 sns.db 里数据的健康度: 月度直方图、字段采集深度、媒体落盘覆盖率、`SnsUserTimeLineBreakFlagV2` 反映的"完整加载锚点"(早于该时间点的数据可能不全)。 报告末尾给出针对性补全建议(例如要补全早期历史, 在微信客户端打开自己朋友圈一直下拉到底, 让客户端向服务器请求历史并写入本地 DB)。
-
-**整理朋友圈本地图片缓存** — `python tools/decode_sns_cache.py` 把微信本地缓存目录(`xwechat_files/<wxid>/cache/<YYYY-MM>/Sns/Img/`)里所有曾经浏览过的朋友圈图片整理为 jpg / png, 按月落到 `<decoded_image_dir>/sns_cache/<YYYY-MM>/<原始 md5>.<ext>`。 即使腾讯 CDN 已经过期、`--decrypt-media` 拿不到的早期媒体, 只要曾经浏览过就能从本地找回来。 默认多进程并行。
-
-**每日定时同步** — `python -m wxdec.cli.daily_sync` 一次跑完"导出 + 整理图片 + 最近 7 天朋友圈", 配 launchd / systemd / schtasks 当定时任务用。
-
-**实时消息流(本地 Web)** — `python main.py` 启动 `http://localhost:5678`, 浏览器里看新消息推送, 图片内联预览, 大约 100 毫秒延迟。
-
-**Claude MCP 集成** — 把对话数据接进 Claude Code, 直接在对话里查微信:
+**Claude MCP 集成** — 在 Claude Code 里直接查微信数据:
 
 ```bash
 claude mcp add wechat -- python /path/to/wx-data-toolkit/wxdec/mcp_server.py
 ```
 
-可用工具:
+<details>
+<summary>可用工具</summary>
 
 | 工具 | 说明 |
 |---|---|
-| `get_recent_sessions` | 获取最近会话列表 |
-| `get_chat_history(chat_name)` | 获取与指定联系人的聊天历史 |
-| `search_messages(keyword)` | 在所有聊天记录中搜索关键词 |
-| `get_contacts()` | 列出所有联系人 |
-| `get_contact_tags()` | 列出所有联系人标签及成员数量 |
-| `get_tag_members(tag_name)` | 获取指定标签下的所有联系人 |
-| `get_new_messages()` | 获取自上次调用以来的新消息 |
-| `get_voice_messages(chat_name)` | 列出某会话所有语音消息(local_id、时长、时间戳) |
-| `decode_voice(chat_name, local_id)` | 解码 SILK 语音为本地 WAV 文件 |
-| `transcribe_voice(chat_name, local_id)` | 转录语音为文字(自动检测语言) |
+| `get_recent_sessions` | 最近会话列表 |
+| `get_chat_history(chat_name)` | 指定联系人的聊天历史 |
+| `search_messages(keyword)` | 全聊天记录搜索 |
+| `get_contacts()` | 联系人列表 |
+| `get_contact_tags()` / `get_tag_members(tag_name)` | 标签与成员 |
+| `get_new_messages()` | 自上次调用以来的新消息 |
+| `decode_voice` / `transcribe_voice` | 语音解码与转录 |
 
-#### ⚠️ 语音转录隐私
+语音转录默认使用本地 Whisper, 数据留在本机。在 `config.json` 设 `"transcription_backend": "openai"` + `"openai_api_key"` 可切换到 OpenAI API(更快, 但**语音会上传至 OpenAI**)。
 
-`transcribe_voice` 默认使用本地 Whisper(CPU), 数据全程留在本机。 `python -m wxdec.cli.transcribe_chat` 批量 CLI 共享同一份配置。
+</details>
 
-如需切换到 OpenAI Whisper API(更快、中文精度更高), 在 `config.json` 中:
-
-```json
-{
-    "transcription_backend": "openai",
-    "openai_api_key": "sk-..."
-}
-```
-
-启用后**语音文件会上传至 OpenAI 服务器**进行转录。 需 `pip install openai`。
-
-- 成本:约 $0.006 / 分钟(OpenAI 计价)
-- 文件 > 25MB 在上传前被拒绝(OpenAI 上限)
-- 首次启用云后端时 stderr 会打一行警告
-- `transcription_backend` 或 `openai_api_key` 任一缺失时静默回退 local
-- 切换后端后, 旧缓存条目(backend 不匹配)会自动重新转录
-
-→ [使用案例:在 Claude 对话里查询微信数据](docs/usage.md)
+→ [使用案例与示例](docs/usage.md)
 
 ## 配置
 
