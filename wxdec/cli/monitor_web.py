@@ -532,6 +532,8 @@ def _convert_hevc_to_jpeg(hevc_path, jpeg_path):
 # ============ 监听器 ============
 
 class SessionMonitor:
+    CONTACT_REFRESH_COOLDOWN = 30
+
     def __init__(self, enc_key, session_db, contact_names, db_cache=None, username_db_map=None):
         self.enc_key = enc_key
         self.session_db = session_db
@@ -544,6 +546,33 @@ class SessionMonitor:
         self.patched_pages = 0
         # 已显示消息去重: {(username, timestamp, base_msg_type), ...}
         self._shown_keys = set()
+        self._contact_db_mtime = 0
+        self._last_contact_refresh = 0
+
+    def _maybe_refresh_contacts(self):
+        if not self.db_cache:
+            return
+        try:
+            contact_path = self.db_cache.get(os.path.join("contact", "contact.db"))
+        except Exception as e:
+            print(f"  [contact] 实时解密 contact.db 失败: {e}", flush=True)
+            return
+        if not contact_path:
+            return
+        try:
+            curr_mtime = os.path.getmtime(contact_path)
+        except OSError:
+            return
+        if curr_mtime <= self._contact_db_mtime:
+            return
+        now = time.time()
+        if now - self._last_contact_refresh < self.CONTACT_REFRESH_COOLDOWN:
+            return
+        refreshed = load_contact_names(contact_path)
+        if refreshed:
+            self.contact_names.update(refreshed)
+        self._contact_db_mtime = curr_mtime
+        self._last_contact_refresh = now
 
     def resolve_image(self, username, timestamp):
         """解密图片: username+timestamp → 解密后的图片文件名，失败返回 None"""
@@ -1315,22 +1344,9 @@ class SessionMonitor:
             is_new = prev and (curr['timestamp'] > prev['timestamp'] or
                                (curr['timestamp'] == prev['timestamp'] and curr['msg_type'] != prev.get('msg_type')))
             if is_new:
+                self._maybe_refresh_contacts()
                 display = self.contact_names.get(username, username)
                 is_group = '@chatroom' in username
-                # 新群/新联系人不在缓存中时，通过 db_cache 实时解密 contact.db 后重新加载
-                # （load_contact_names 默认读静态快照，新加的联系人不在里面，这里必须走实时解密）
-                if username not in self.contact_names:
-                    fresh_contact_db = None
-                    if self.db_cache:
-                        try:
-                            fresh_contact_db = self.db_cache.get(os.path.join("contact", "contact.db"))
-                        except Exception as e:
-                            print(f"  [contact] 实时解密 contact.db 失败: {e}", flush=True)
-                    refreshed = load_contact_names(fresh_contact_db)
-                    self.contact_names.update(refreshed)
-                    display = self.contact_names.get(username, username)
-                    if username in refreshed:
-                        print(f"  [contact] 新增: {username} -> {display}", flush=True)
                 sender = ''
                 if is_group:
                     sender = self.contact_names.get(curr['sender'], curr['sender_name'] or curr['sender'])
