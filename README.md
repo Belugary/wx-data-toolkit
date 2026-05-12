@@ -72,7 +72,7 @@ claude mcp add wechat -- python /path/to/wx-data-toolkit/wxdec/mcp_server.py
 | `decode_image` / `decode_voice` / `transcribe_voice` | 图片解密、语音解码与转录 |
 | `decode_file_message` | 定位文件消息（PDF/docx 等）的本地副本 |
 
-语音转录默认使用本地 Whisper, 数据留在本机。在 `config.json` 设 `"transcription_backend": "openai"` + `"openai_api_key"` 可切换到 OpenAI API(更快, 但**语音会上传至 OpenAI**)。
+语音转录默认使用本地 FunASR [SenseVoice-Small](https://www.modelscope.cn/models/iic/SenseVoiceSmall)(多语种, 中文表现优于 Whisper-large-v3), 数据留在本机, 首次运行下载 ~900MB 权重 (`pip install funasr`)。下载源由 `local_sensevoice_hub` 控制, 默认 `"ms"` (ModelScope, 国内最快); 海外用户可设 `"hf"` (HuggingFace) 并把 `local_sensevoice_model` 改为 `"FunAudioLLM/SenseVoiceSmall"`。在 `config.json` 设 `"transcription_backend": "openai"` + `"openai_api_key"` 可切换到 OpenAI Whisper API(**语音会上传至 OpenAI**)。
 
 </details>
 

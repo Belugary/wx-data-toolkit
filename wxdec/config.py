@@ -30,10 +30,11 @@ _DEFAULT = {
     "decrypted_dir": "decrypted",
     "decoded_image_dir": "decoded_images",
     "wechat_process": _DEFAULT_PROCESS,
-    # 语音转录后端: "local" (默认, 本地 Whisper) 或 "openai" (OpenAI API)
+    # 语音转录后端: "local" (默认, 本地 FunASR SenseVoice-Small) 或 "openai" (OpenAI API)
     # 切到 openai 时语音将上传至 OpenAI 服务器, 详见 README "语音转录隐私" 章节
     "transcription_backend": "local",
-    "local_whisper_model": "base",
+    "local_sensevoice_model": "iic/SenseVoiceSmall",
+    "local_sensevoice_hub": "ms",
     "openai_api_key": "",
 }
 

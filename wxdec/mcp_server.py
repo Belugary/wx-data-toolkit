@@ -1613,16 +1613,16 @@ def decode_voice(chat_name: str, local_id: int) -> str:
 
 # ============ 语音转录缓存 ============
 #
-# Whisper 转录耗时（CPU 下每条数秒到数十秒），且结果是确定性的
+# 转录耗时（CPU 下每条数秒到数十秒），且结果是确定性的
 # （同一段 voice_data → 同一段 text），非常适合缓存。
 #
 # 缓存 key 用 json.dumps([username, local_id])：local_id 在单个 username 下
 # 稳定唯一，套一层 JSON 序列化保证 username 里若含分隔符也不会与其它条目碰撞。
 #
 # 写入走 temp + os.replace 原子替换，避免进程中途被杀导致整份缓存损坏
-# （Whisper 的单次代价远高于 DBCache，破档不可接受）。
+# （转录单次代价远高于 DBCache，破档不可接受）。
 #
-# 条目里记录 model_size：Whisper 升级默认模型后，旧条目自动视为失效并重跑。
+# 条目里记录 model_size：模型升级或切换后端后，旧条目自动视为失效并重跑。
 
 VOICE_TRANSCRIPTION_CACHE_FILE = os.path.join(SCRIPT_DIR, "voice_transcriptions.json")
 
@@ -1694,19 +1694,28 @@ def _save_voice_transcription_cache():
 
 # ============ 语音转录后端 ============
 #
-# 默认 local: 完全保留原有行为，CPU 上跑本地 Whisper。
+# 默认 local: CPU 上跑 FunASR SenseVoice-Small (多语种, 中文 CER 优于 Whisper-large-v3,
+#   首次使用从 hub 下载 ~900MB SenseVoice + ~2MB VAD 权重)。
 # opt-in openai: 需要 transcription_backend="openai" 且 openai_api_key 都齐
-# 才会上云；任一缺失静默回退 local + stderr 一行警告（用户感知到误配置但不阻塞）。
+#   才会上云；任一缺失静默回退 local + stderr 一行警告（用户感知到误配置但不阻塞）。
 # 详见 README "语音转录隐私" 章节。
 
 TRANSCRIPTION_BACKEND = _cfg.get("transcription_backend", "local")
-LOCAL_WHISPER_MODEL = _cfg.get("local_whisper_model", "base")
+LOCAL_SENSEVOICE_MODEL = _cfg.get("local_sensevoice_model", "iic/SenseVoiceSmall")
+# hub: 模型权重下载源, "ms" (ModelScope, 国内速度优先) 或 "hf" (HuggingFace)。
+# 注意两边的 repo 名不同, 切到 hf 需同时把 local_sensevoice_model 改为
+# "FunAudioLLM/SenseVoiceSmall" (默认值 "iic/SenseVoiceSmall" 是 ModelScope repo)。
+LOCAL_SENSEVOICE_HUB = _cfg.get("local_sensevoice_hub", "ms")
 OPENAI_API_KEY = _cfg.get("openai_api_key", "")
 
 OPENAI_WHISPER_MODEL = "whisper-1"           # OpenAI 当前唯一型号
 OPENAI_AUDIO_LIMIT_BYTES = 25 * 1024 * 1024  # OpenAI 25MB 上限
 
-_whisper_model = None
+# SenseVoice 原始输出形如 "<|zh|><|NEUTRAL|><|Speech|><|withitn|>正文……"，
+# 第一个 <|xx|> tag 是检测到的语言。
+_SENSEVOICE_LANG_TAG_RE = re.compile(r"<\|(zh|en|yue|ja|ko|nospeech)\|>")
+
+_sensevoice_model = None
 _openai_client = None
 _openai_warning_emitted = False
 _fallback_warning_emitted = False
@@ -1719,7 +1728,7 @@ def _resolve_active_backend():
         if not OPENAI_API_KEY:
             if not _fallback_warning_emitted:
                 print(
-                    "[whisper] transcription_backend=openai 但未配置 openai_api_key，"
+                    "[transcribe] transcription_backend=openai 但未配置 openai_api_key，"
                     "回退到本地模型",
                     file=sys.stderr, flush=True,
                 )
@@ -1734,26 +1743,51 @@ def _cache_signature():
     backend = _resolve_active_backend()
     if backend == "openai":
         return {"backend": "openai", "model_size": OPENAI_WHISPER_MODEL}
-    return {"backend": "local", "model_size": LOCAL_WHISPER_MODEL}
+    return {"backend": "local", "model_size": LOCAL_SENSEVOICE_MODEL}
 
 
-def _get_whisper_model(model_size=None):
-    global _whisper_model
-    if model_size is None:
-        model_size = LOCAL_WHISPER_MODEL
-    if _whisper_model is None:
-        import whisper
-        _whisper_model = whisper.load_model(model_size)
-    return _whisper_model
+def _get_sensevoice_model():
+    """惰性加载 FunASR AutoModel (SenseVoice-Small + FSMN VAD)。
+
+    首次调用从 LOCAL_SENSEVOICE_HUB ("ms" = ModelScope, "hf" = HuggingFace)
+    拉取模型权重 (SenseVoice ~900MB + VAD ~2MB)。注意 VAD 模型始终走
+    ModelScope (funasr 内部固定行为)。device 留空让 funasr 自行选择
+    CPU/GPU/MPS, SenseVoice-Small 在 CPU 上已足够快 (rtf ~0.08, 即 1 秒
+    音频耗时 ~80ms)。
+    """
+    global _sensevoice_model
+    if _sensevoice_model is None:
+        from funasr import AutoModel
+        _sensevoice_model = AutoModel(
+            model=LOCAL_SENSEVOICE_MODEL,
+            vad_model="fsmn-vad",
+            vad_kwargs={"max_single_segment_time": 30000},
+            hub=LOCAL_SENSEVOICE_HUB,
+            disable_update=True,
+        )
+    return _sensevoice_model
 
 
 def _transcribe_local(wav_path):
-    model = _get_whisper_model()
-    result = model.transcribe(wav_path)
-    return {
-        "language": result.get("language", "unknown"),
-        "text": result.get("text", "").strip(),
-    }
+    """SenseVoice-Small 本地转录。语种从 raw 文本中的 <|xx|> tag 解析,
+    正文走 rich_transcription_postprocess 去除标签 / 还原标点。
+    """
+    from funasr.utils.postprocess_utils import rich_transcription_postprocess
+    model = _get_sensevoice_model()
+    result = model.generate(
+        input=wav_path,
+        cache={},
+        language="auto",
+        use_itn=True,
+        batch_size_s=60,
+        merge_vad=True,
+        merge_length_s=15,
+    )
+    raw_text = result[0].get("text", "") if result else ""
+    lang_match = _SENSEVOICE_LANG_TAG_RE.search(raw_text)
+    language = lang_match.group(1) if lang_match else "unknown"
+    text = rich_transcription_postprocess(raw_text).strip()
+    return {"language": language, "text": text}
 
 
 def _transcribe_openai(wav_path):
@@ -1776,7 +1810,7 @@ def _transcribe_openai(wav_path):
 
     if not _openai_warning_emitted:
         print(
-            "[whisper] 已启用 OpenAI Whisper API，"
+            "[transcribe] 已启用 OpenAI Whisper API，"
             "语音将上传至 OpenAI 服务器进行转录",
             file=sys.stderr, flush=True,
         )
@@ -1815,16 +1849,17 @@ def _transcribe(wav_path, backend):
 def transcribe_voice(chat_name: str, local_id: int) -> str:
     """将微信语音消息转录为文字（自动检测语言，保留原语言）。
 
-    首次转录会先解码 SILK 语音为 WAV，再用 Whisper 转录；结果缓存到
-    voice_transcriptions.json，重复调用直接返回缓存（跳过 SILK 解码
-    和 Whisper 推理）。后端切换或本地模型升级（如 base → small）后，
-    旧条目自动视为失效并重新转录。首次运行本地模型会下载约 145MB 权重。
+    首次转录会先解码 SILK 语音为 WAV，再用 FunASR SenseVoice-Small 转录；
+    结果缓存到 voice_transcriptions.json，重复调用直接返回缓存（跳过 SILK
+    解码和模型推理）。后端切换或本地模型变更后，旧条目自动视为失效并重新
+    转录。首次运行本地模型会下载 ~900MB SenseVoice + ~2MB VAD 权重
+    (hub 由 local_sensevoice_hub 配置, 默认 ModelScope)。
 
     后端由 config.json 中 transcription_backend 字段控制（local/openai）。
     详见 README "语音转录隐私" 章节。
 
     依赖:
-      - 本地后端: pip install silk-python openai-whisper
+      - 本地后端: pip install silk-python funasr
         (silk-python 的 import 名为 pysilk)
       - OpenAI 后端: pip install silk-python openai
 
@@ -1859,12 +1894,12 @@ def transcribe_voice(chat_name: str, local_id: int) -> str:
             time_label = "-"
         return f"[{time_label}] ({lang})\n{entry['text']}"
 
-    # 未命中：本地后端才需要 whisper 包，云后端在 _transcribe_openai 内单独检查
+    # 未命中：本地后端才需要 funasr 包，云后端在 _transcribe_openai 内单独检查
     if sig["backend"] == "local":
         try:
-            import whisper  # noqa: F401
+            import funasr  # noqa: F401
         except ImportError:
-            return "缺少依赖: pip install openai-whisper"
+            return "缺少依赖: pip install funasr"
     # SILK 解码两条路径都需要
     try:
         import pysilk  # noqa: F401
@@ -1885,7 +1920,7 @@ def transcribe_voice(chat_name: str, local_id: int) -> str:
     text = result["text"]
     lang = result["language"]
 
-    # 写缓存：即使 text 为空也缓存（Whisper 偶尔对静音/极短片段返回空），
+    # 写缓存：即使 text 为空也缓存（模型偶尔对静音/极短片段返回空），
     # 配合 backend + model_size 字段，切换后端或升级模型后会自动重转。
     cache[cache_key] = {
         "text": text,

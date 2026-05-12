@@ -98,7 +98,7 @@ class CacheBackendMatchTests(_CacheIsolationMixin, unittest.TestCase):
                           return_value=("/tmp/fake.wav", 24000 * 2)), \
              patch.object(mcp_server, "_transcribe_local",
                           return_value={"text": "local-result", "language": "zh"}), \
-             patch.dict(sys.modules, {"whisper": MagicMock(), "pysilk": MagicMock()}):
+             patch.dict(sys.modules, {"funasr": MagicMock(), "pysilk": MagicMock()}):
             result = mcp_server.transcribe_voice("test_contact", 42)
 
         # 没返回旧 openai 缓存，而是走了 local 转录流程

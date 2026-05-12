@@ -4,6 +4,7 @@
     "decrypted_dir": "decrypted",
     "wechat_process": "Weixin.exe",
     "transcription_backend": "local",
-    "local_whisper_model": "base",
+    "local_sensevoice_model": "iic/SenseVoiceSmall",
+    "local_sensevoice_hub": "ms",
     "openai_api_key": ""
 }

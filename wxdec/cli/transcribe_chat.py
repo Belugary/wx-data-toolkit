@@ -15,7 +15,8 @@
 行为说明:
     - 后端由 config.json 中 transcription_backend 字段控制 (local/openai)，
       与 MCP transcribe_voice 工具共享配置。详见 README "语音转录隐私" 章节。
-    - 默认 local: 使用本地 Whisper (CPU，单线程)，首次运行下载 ~145 MB 权重。
+    - 默认 local: 使用本地 FunASR SenseVoice-Small (CPU)，首次运行下载
+      ~900MB SenseVoice + ~2MB VAD 权重。
     - 切到 openai: 语音上传至 OpenAI 服务器转录 (~$0.006/分钟)。
     - 幂等: 已有 "transcription" 字段的消息会被跳过，因此崩溃/中断后可安全重跑。
     - 崩溃安全: 每处理完一条即整体重写输出 JSON，进程中断最多丢失当前一条。
@@ -76,8 +77,8 @@ def transcribe_export(input_path, output_path):
     print(f"Found {total} voice messages to transcribe.")
     print(f"Backend: {backend}")
     if backend == "local":
-        print("Loading Whisper model (first run downloads ~145MB)...")
-        mcp_server._get_whisper_model()
+        print("Loading SenseVoice model (first run downloads ~900MB)...")
+        mcp_server._get_sensevoice_model()
         print("Model ready.\n")
     else:
         print("")

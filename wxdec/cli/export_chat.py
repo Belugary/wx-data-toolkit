@@ -28,7 +28,7 @@
 1-on-1 聊天省略 "is_group"。
 
 语音消息以 type "voice" 导出且不带 transcription 字段；运行
-transcribe_chat.py 可用 Whisper 补齐转录。
+transcribe_chat.py 可用 FunASR SenseVoice-Small 补齐转录。
 
 需先完成 WeChat DB 解密（详见 README）。
 

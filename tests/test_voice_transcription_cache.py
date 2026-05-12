@@ -194,13 +194,13 @@ class TranscribeVoiceCacheHitTests(_CacheIsolationMixin, unittest.TestCase):
             "text": "缓存命中文本",
             "language": "zh",
             "create_time": 1700000000,
-            "model_size": mcp_server.LOCAL_WHISPER_MODEL,
+            "model_size": mcp_server.LOCAL_SENSEVOICE_MODEL,
         })
 
         with patch.object(mcp_server, "resolve_username", return_value="wxid_test") as mock_resolve, \
              patch.object(mcp_server, "_fetch_voice_row") as mock_fetch, \
              patch.object(mcp_server, "_silk_to_wav") as mock_silk, \
-             patch.object(mcp_server, "_get_whisper_model") as mock_model:
+             patch.object(mcp_server, "_get_sensevoice_model") as mock_model:
             result = mcp_server.transcribe_voice("test_contact", 7)
 
         mock_resolve.assert_called_once_with("test_contact")
@@ -216,7 +216,7 @@ class TranscribeVoiceCacheHitTests(_CacheIsolationMixin, unittest.TestCase):
         self._seed(key, {
             "text": "历史条目",
             "language": "zh",
-            "model_size": mcp_server.LOCAL_WHISPER_MODEL,
+            "model_size": mcp_server.LOCAL_SENSEVOICE_MODEL,
         })
 
         with patch.object(mcp_server, "resolve_username", return_value="wxid_test"), \
@@ -227,13 +227,13 @@ class TranscribeVoiceCacheHitTests(_CacheIsolationMixin, unittest.TestCase):
         self.assertIn("历史条目", result)
 
     def test_cache_hit_returns_empty_text_without_retranscribing(self):
-        # Whisper 返回空也要缓存；再次调用应直接返回空，不进入 miss 路径
+        # 模型返回空也要缓存；再次调用应直接返回空，不进入 miss 路径
         key = mcp_server._voice_transcription_cache_key("wxid_test", 9)
         self._seed(key, {
             "text": "",
             "language": "zh",
             "create_time": 1700000000,
-            "model_size": mcp_server.LOCAL_WHISPER_MODEL,
+            "model_size": mcp_server.LOCAL_SENSEVOICE_MODEL,
         })
 
         with patch.object(mcp_server, "resolve_username", return_value="wxid_test"), \
@@ -244,8 +244,8 @@ class TranscribeVoiceCacheHitTests(_CacheIsolationMixin, unittest.TestCase):
         self.assertIn("(zh)", result)
 
     def test_model_mismatch_is_treated_as_miss(self):
-        # 缓存条目的 model_size 和当前 LOCAL_WHISPER_MODEL 不一致时，
-        # 不应命中；进入 miss 路径（这里无 whisper 依赖，应落到"缺少依赖"分支）。
+        # 缓存条目的 model_size 和当前 LOCAL_SENSEVOICE_MODEL 不一致时，
+        # 不应命中；进入 miss 路径（这里无 funasr 依赖，应落到"缺少依赖"分支）。
         key = mcp_server._voice_transcription_cache_key("wxid_test", 10)
         self._seed(key, {
             "text": "旧模型结果",
@@ -255,8 +255,8 @@ class TranscribeVoiceCacheHitTests(_CacheIsolationMixin, unittest.TestCase):
         })
 
         with patch.object(mcp_server, "resolve_username", return_value="wxid_test"), \
-             patch.dict("sys.modules", {"whisper": None}):
-            # whisper=None 时 `import whisper` 触发 ImportError
+             patch.dict("sys.modules", {"funasr": None}):
+            # funasr=None 时 `import funasr` 触发 ImportError
             result = mcp_server.transcribe_voice("test_contact", 10)
 
         # 走了 miss 路径 → 返回缺依赖提示，而不是返回旧缓存文本
