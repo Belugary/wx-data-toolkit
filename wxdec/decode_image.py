@@ -159,6 +159,13 @@ def v2_decrypt_file(dat_path, out_path=None, aes_key=None, xor_key=0x88):
 
     # AES 对齐: PKCS7 填充使实际密文 >= aes_size，向上对齐到 16
     # 当 aes_size 是 16 的倍数时，还需要加 16 (完整填充块)
+    #
+    # 注意：不要"简化"成 (aes_size + 15) // 16 * 16 + 去掉 unpad —— 那是 WongJingGitt
+    # fork 的"修复",实测在真实样本上反而损坏图片。9070 个真实 V2 .dat 全部
+    # aes_size=1024 (16 倍数),用截断方案会把 raw 段前 16 字节也当 AES ciphertext
+    # 多解一次,产生 16 字节随机字节插入 JPG 像素流;`file` 命令因为 EXIF 头部仍
+    # 完整还能识别,但 macOS sips/libjpeg 拒绝解码,Wong's fork 这条代码路径目前
+    # 在静默损坏所有 V2 图片。
     aligned_aes_size = aes_size
     aligned_aes_size -= ~(~aligned_aes_size % 16)  # 同 wx-dat 的公式
 
