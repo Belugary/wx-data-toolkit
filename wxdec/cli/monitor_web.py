@@ -9,6 +9,7 @@ http://localhost:5678
 import hashlib, os, sys, json, time, sqlite3, io, threading, queue, traceback
 import hmac as hmac_mod
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -827,6 +828,38 @@ class SessionMonitor:
             except OSError:
                 pass
 
+    def _lookup_latest_local_id(self, username, timestamp):
+        """从 message_N.db 查指定 username 在 timestamp 的最大 local_id。
+
+        SessionTable 触发推送时调用此方法拿到对应 local_id，加到 _shown_keys 后
+        `_check_hidden_messages` 路径能用 (username, local_id) 精确去重，避免 issue #79
+        的"同秒同类型多条消息 10 丢 4"。
+
+        时机风险：SessionTable 写入比 message DB 早几毫秒，可能查不到。查不到时返回 None，
+        调用方应选择跳过加 key（让 hidden 路径稍后补救并自己加 key）。
+        """
+        if not self.db_cache or not self.username_db_map:
+            return None
+        db_keys = self.username_db_map.get(username, [])
+        if not db_keys:
+            return None
+        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
+        for db_key in db_keys:
+            dec_path = self.db_cache.get(db_key)
+            if not dec_path:
+                continue
+            try:
+                with closing(sqlite3.connect(f"file:{dec_path}?mode=ro&immutable=1", uri=True)) as conn:
+                    row = conn.execute(
+                        f"SELECT MAX(local_id) FROM [{table_name}] WHERE create_time = ?",
+                        (timestamp,),
+                    ).fetchone()
+                    if row and row[0]:
+                        return row[0]
+            except Exception:
+                continue
+        return None
+
     def _check_hidden_messages(self, username, prev_ts, curr_ts, curr_msg_type, display, is_group, sender):
         """检查时间窗口内是否有被 session 摘要覆盖的消息（文字、图片、表情等）
 
@@ -857,10 +890,10 @@ class SessionMonitor:
                     try:
                         conn = sqlite3.connect(f"file:{dec_path}?mode=ro", uri=True)
                         rows = conn.execute(f"""
-                            SELECT create_time, local_type, message_content, WCDB_CT_message_content
+                            SELECT local_id, create_time, local_type, message_content, WCDB_CT_message_content
                             FROM [{table_name}]
                             WHERE create_time >= ? AND create_time <= ?
-                            ORDER BY create_time ASC
+                            ORDER BY create_time ASC, local_id ASC
                         """, (prev_ts, curr_ts)).fetchall()
                         conn.close()
                         all_rows.extend(rows)
@@ -869,7 +902,8 @@ class SessionMonitor:
                         cache_failed = True
                         break
             # 检查是否找到了 curr_ts 的消息（说明缓存是最新的）
-            has_curr = any(r[0] == curr_ts for r in all_rows)
+            # 注: r[1] 是 create_time（新 schema：local_id, create_time, local_type, ...）
+            has_curr = any(r[1] == curr_ts for r in all_rows)
             if has_curr or cache_failed:
                 break
             # 缓存可能还没更新到最新数据，短暂等待后重试
@@ -890,11 +924,13 @@ class SessionMonitor:
             print(f"  [hidden] 缓存查到 {len(all_rows)} 条", flush=True)
 
         # 过滤出隐藏消息
+        # 去重 key 用 local_id（之前用 (username, ts, base) 太粗，同秒同类型多条会被
+        # 误判为重复，导致 issue #79 的 "10 丢 4"）
         hidden_msgs = []
-        for ts, lt, mc, ct in all_rows:
+        for local_id, ts, lt, mc, ct in all_rows:
             base = lt % 4294967296 if lt > 4294967296 else lt
-            # 跳过已显示的消息（精确匹配 username+timestamp+type）
-            if (username, ts, base) in self._shown_keys:
+            # 跳过已显示的消息（按 local_id 精确去重）
+            if (username, local_id) in self._shown_keys:
                 continue
             # 解压 zstd
             if isinstance(mc, bytes) and ct == 4:
@@ -904,7 +940,7 @@ class SessionMonitor:
                     mc = mc.decode('utf-8', errors='replace') if isinstance(mc, bytes) else ''
             elif isinstance(mc, bytes):
                 mc = mc.decode('utf-8', errors='replace')
-            hidden_msgs.append((ts, base, mc or ''))
+            hidden_msgs.append((local_id, ts, base, mc or ''))
 
         print(f"  [hidden] 找到 {len(hidden_msgs)} 条隐藏消息", flush=True)
 
@@ -912,8 +948,8 @@ class SessionMonitor:
             return
 
         global messages_log
-        for ts, base, mc in hidden_msgs:
-            self._shown_keys.add((username, ts, base))
+        for local_id, ts, base, mc in hidden_msgs:
+            self._shown_keys.add((username, local_id))
             msg_data = {
                 'time': datetime.fromtimestamp(ts).strftime('%H:%M:%S'),
                 'timestamp': ts,
@@ -1376,7 +1412,13 @@ class SessionMonitor:
                 }
 
                 new_msgs.append(msg_data)
-                self._shown_keys.add((username, curr['timestamp'], curr['msg_type']))
+                # _shown_keys 改用 (username, local_id) 精确去重（issue #79）。
+                # SessionTable 不带 local_id，去 message_N.db 查 max(local_id) WHERE create_time=curr_ts。
+                # 查不到时（message DB 写入滞后于 SessionTable）跳过加 key，让 _check_hidden_messages
+                # 1 秒后查到时自己 emit 并加 key。这种情况下偶发轻微重复，但比丢消息好。
+                latest_local_id = self._lookup_latest_local_id(username, curr['timestamp'])
+                if latest_local_id is not None:
+                    self._shown_keys.add((username, latest_local_id))
 
                 # 图片消息: 后台异步解密（不阻塞轮询）
                 if curr['msg_type'] == 3:
@@ -1427,9 +1469,12 @@ class SessionMonitor:
 
         self.prev_state = curr_state
 
-        # 清理过期的去重 key（保留最近 5 分钟）
-        cutoff = int(time.time()) - 300
-        self._shown_keys = {k for k in self._shown_keys if k[1] > cutoff}
+        # 清理 _shown_keys（按数量上限）：local_id 不是时间戳不能按时间 prune。
+        # 超过 10000 时保留 local_id 最大的 5000 条（最新消息优先）。
+        # 实际触发频率：~几小时一次，set lookup 仍是 O(1)。
+        if len(self._shown_keys) > 10000:
+            by_local_id = sorted(self._shown_keys, key=lambda k: k[1], reverse=True)
+            self._shown_keys = set(by_local_id[:5000])
 
 def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_db_map=None):
     mon = SessionMonitor(enc_key, session_db, contact_names, db_cache, username_db_map)
