@@ -835,5 +835,80 @@ class ExtractReferExtrasTests(unittest.TestCase):
         self.assertNotIn('refer_chatusr', out)
 
 
+class FormatVoiceTextTests(unittest.TestCase):
+    def test_happy_path_with_voicelength(self):
+        xml = '<msg><voicemsg voicelength="3300"/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音 3.3s]')
+
+    def test_subsecond_voice(self):
+        xml = '<msg><voicemsg voicelength="500"/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音 0.5s]')
+
+    def test_long_voice_rounded_to_one_decimal(self):
+        xml = '<msg><voicemsg voicelength="60123"/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音 60.1s]')
+
+    def test_missing_voicelength_attr_falls_back(self):
+        xml = '<msg><voicemsg/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音]')
+
+    def test_zero_voicelength_falls_back(self):
+        xml = '<msg><voicemsg voicelength="0"/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音]')
+
+    def test_non_numeric_voicelength_falls_back(self):
+        xml = '<msg><voicemsg voicelength="abc"/></msg>'
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音]')
+
+    def test_no_voicemsg_tag_falls_back(self):
+        self.assertEqual(msg_format._format_voice_text(''), '[语音]')
+        self.assertEqual(msg_format._format_voice_text(None), '[语音]')
+        self.assertEqual(msg_format._format_voice_text('<msg/>'), '[语音]')
+
+    def test_malformed_xml_falls_back(self):
+        self.assertEqual(
+            msg_format._format_voice_text('<voicemsg voicelength="3300"'),
+            '[语音]',
+        )
+
+    def test_xxe_payload_rejected_by_parser(self):
+        # _parse_xml_root 用 _XML_UNSAFE_RE 拒绝 DOCTYPE/ENTITY,fallback 到 [语音]。
+        xml = (
+            '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+            '<msg><voicemsg voicelength="3300"/></msg>'
+        )
+        self.assertEqual(msg_format._format_voice_text(xml), '[语音]')
+
+    def test_end_to_end_format_message_text_attaches_id_suffix(self):
+        xml = '<msg><voicemsg voicelength="3300"/></msg>'
+        _, text = msg_format._format_message_text(
+            local_id=72481,
+            local_type=34,
+            content=xml,
+            is_group=False,
+            chat_username='wxid_x',
+            chat_display_name='Alice',
+            names={},
+            create_time=1700000000,
+        )
+        self.assertEqual(text, '[语音 3.3s] (local_id=72481, ts=1700000000)')
+
+    def test_end_to_end_missing_voicelength_still_attaches_id(self):
+        # 退化场景:语音消息正文里没有 voicelength,仍然要把 local_id 附上,
+        # 否则 LLM 看到 [语音] 还得回头查 get_voice_messages。
+        xml = '<msg><voicemsg/></msg>'
+        _, text = msg_format._format_message_text(
+            local_id=72481,
+            local_type=34,
+            content=xml,
+            is_group=False,
+            chat_username='wxid_x',
+            chat_display_name='Alice',
+            names={},
+            create_time=0,
+        )
+        self.assertEqual(text, '[语音] (local_id=72481)')
+
+
 if __name__ == '__main__':
     unittest.main()
