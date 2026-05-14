@@ -935,21 +935,24 @@ class SessionMonitor:
             except OSError:
                 pass
 
-    def _lookup_latest_local_id(self, username, timestamp):
-        """从 message_N.db 查指定 username 在 timestamp 的最大 local_id。
+    def _lookup_latest_message(self, username, timestamp):
+        """从 message_N.db 查指定 username 在 timestamp 的最新一条消息，返回
+        (local_id, message_content)。
 
-        SessionTable 触发推送时调用此方法拿到对应 local_id，加到 _shown_keys 后
-        `_check_hidden_messages` 路径能用 (username, local_id) 精确去重，避免 issue #79
-        的"同秒同类型多条消息 10 丢 4"。
+        SessionTable 推送时调用：
+        - local_id 加入 _shown_keys，供 `_check_hidden_messages` 精确去重 (issue #79)
+        - message_content 用于替换 SessionTable.summary 的 ~80 字短截断 (issue #42)
 
-        时机风险：SessionTable 写入比 message DB 早几毫秒，可能查不到。查不到时返回 None，
-        调用方应选择跳过加 key（让 hidden 路径稍后补救并自己加 key）。
+        两者本就同行，合并到一次 SELECT，相比原 MAX(local_id) 不增加 IO。
+
+        时机风险：SessionTable 写入比 message DB 早几毫秒，可能查不到。查不到时返回
+        (None, None)，调用方跳过加 key，由 `_check_hidden_messages` 兜底。
         """
         if not self.db_cache or not self.username_db_map:
-            return None
+            return None, None
         db_keys = self.username_db_map.get(username, [])
         if not db_keys:
-            return None
+            return None, None
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         for db_key in db_keys:
             dec_path = self.db_cache.get(db_key)
@@ -958,14 +961,28 @@ class SessionMonitor:
             try:
                 with closing(sqlite3.connect(f"file:{dec_path}?mode=ro&immutable=1", uri=True)) as conn:
                     row = conn.execute(
-                        f"SELECT MAX(local_id) FROM [{table_name}] WHERE create_time = ?",
+                        f"SELECT local_id, message_content, WCDB_CT_message_content "
+                        f"FROM [{table_name}] WHERE create_time = ? "
+                        f"ORDER BY local_id DESC LIMIT 1",
                         (timestamp,),
                     ).fetchone()
                     if row and row[0]:
-                        return row[0]
+                        local_id, mc, ct = row
+                        if isinstance(mc, bytes) and ct == 4:
+                            try:
+                                mc = _zstd_dctx.decompress(mc).decode('utf-8', errors='replace')
+                            except Exception:
+                                mc = mc.decode('utf-8', errors='replace')
+                        elif isinstance(mc, bytes):
+                            mc = mc.decode('utf-8', errors='replace')
+                        # 群消息 message_content 形如 'wxid_xxx:\n<正文>'，与
+                        # SessionTable.summary 调用方一致地剥离前缀
+                        if mc and ':\n' in mc:
+                            mc = mc.split(':\n', 1)[1]
+                        return local_id, mc
             except Exception:
                 continue
-        return None
+        return None, None
 
     def _check_hidden_messages(self, username, prev_ts, curr_ts, curr_msg_type, display, is_group, sender):
         """检查时间窗口内是否有被 session 摘要覆盖的消息（文字、图片、表情等）
@@ -1501,12 +1518,16 @@ class SessionMonitor:
 
                 new_msgs.append(msg_data)
                 # _shown_keys 改用 (username, local_id) 精确去重（issue #79）。
-                # SessionTable 不带 local_id，去 message_N.db 查 max(local_id) WHERE create_time=curr_ts。
+                # SessionTable 不带 local_id，去 message_N.db 查同时拿 local_id 和完整正文：
+                # - local_id 用于去重
+                # - 完整正文替换 SessionTable.summary 的 ~80 字短截断（issue #42）
                 # 查不到时（message DB 写入滞后于 SessionTable）跳过加 key，让 _check_hidden_messages
                 # 1 秒后查到时自己 emit 并加 key。这种情况下偶发轻微重复，但比丢消息好。
-                latest_local_id = self._lookup_latest_local_id(username, curr['timestamp'])
+                latest_local_id, full_content = self._lookup_latest_message(username, curr['timestamp'])
                 if latest_local_id is not None:
                     self._shown_keys.add((username, latest_local_id))
+                    if full_content and len(full_content) > len(msg_data['content']):
+                        msg_data['content'] = full_content
 
                 # 图片消息: 后台异步解密（不阻塞轮询）
                 if curr['msg_type'] == 3:
