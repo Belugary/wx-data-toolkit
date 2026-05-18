@@ -69,6 +69,45 @@ def _load_contacts_from(db_path):
     return names, full
 
 
+def load_contacts_extended(db_path):
+    """Return {username: {display, nick, alias, remark, is_group, is_pub}}.
+
+    Richer than `_load_contacts_from`: includes `alias` (微信号), and
+    structural flags derived from the username shape. Downstream
+    consumers that need to differentiate p2p / group / public-account
+    chats (daily summarizers, browser UIs, search indexes) use this
+    instead of the legacy {username: display} dict.
+
+    `display` priority: remark > nick > username — caller may layer its
+    own override system (codename / yaml) on top.
+    `is_group` ≡ `username.endswith('@chatroom')`.
+    `is_pub`   ≡ `username.startswith('gh_')`.
+
+    Accepts any contact.db path (not bound to the project's global
+    DECRYPTED_DIR) so it can be used against arbitrary decrypted dumps.
+    Empty rows (`username IS NULL OR ''`) are skipped.
+    """
+    out = {}
+    with closing(open_db_readonly(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT username, nick_name, alias, remark FROM contact "
+            "WHERE username IS NOT NULL AND username != ''"
+        ).fetchall()
+    for username, nick, alias, remark in rows:
+        nick = nick or ""
+        alias = alias or ""
+        remark = remark or ""
+        out[username] = {
+            "display": remark or nick or username,
+            "nick": nick,
+            "alias": alias,
+            "remark": remark,
+            "is_group": username.endswith("@chatroom"),
+            "is_pub": username.startswith("gh_"),
+        }
+    return out
+
+
 def get_contact_names():
     global _contact_names, _contact_full
 
