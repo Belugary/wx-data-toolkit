@@ -14,10 +14,15 @@ from wxdec.db_core import _cache, DB_DIR, DECRYPTED_DIR, ALL_KEYS, open_db_reado
 # ============ Contact caches ============
 
 _contact_names = None  # {username: display_name}
-_contact_full = None   # [{username, nick_name, remark}]
+_contact_full = None   # [{username, nick_name, remark, alias, description, phone}]
 _contact_tags = None   # {label_id: {name, sort_order, members: [{username, display_name}]}}
 _self_username = None
 _contact_db_mtime = 0  # mtime of the decrypted contact.db when caches were last populated
+
+# Optional `contact` table columns probed via PRAGMA table_info.
+# Names vary across WeChat client versions; fall back to "" when missing.
+_OPTIONAL_CONTACT_TEXT_COLS = ('alias', 'description')
+_PHONE_COL_CANDIDATES = ('phone_number', 'mobile', 'mobile_phone', 'telephone')
 
 
 def _invalidate_contact_caches():
@@ -58,14 +63,38 @@ def _get_contact_db_path():
 
 
 def _load_contacts_from(db_path):
+    """Load contacts, sniffing optional columns via PRAGMA table_info.
+
+    Returns (names, full):
+      names: {username: display_name}
+      full:  [{username, nick_name, remark, alias, description, phone}]
+
+    Optional columns (alias / description / phone variants) absent from
+    older client schemas are coerced to "" rather than raising — keeps
+    the loader compatible with WeChat 3.x and 4.x dumps.
+    """
     names = {}
     full = []
     with closing(open_db_readonly(db_path)) as conn:
-        for r in conn.execute("SELECT username, nick_name, remark FROM contact").fetchall():
-            uname, nick, remark = r
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(contact)").fetchall()}
+        select_cols = ['username', 'nick_name', 'remark']
+        for col in _OPTIONAL_CONTACT_TEXT_COLS:
+            select_cols.append(col if col in existing_cols else f"NULL AS {col}")
+        phone_col = next((c for c in _PHONE_COL_CANDIDATES if c in existing_cols), None)
+        select_cols.append(f"{phone_col} AS phone" if phone_col else "NULL AS phone")
+        query = f"SELECT {', '.join(select_cols)} FROM contact"
+        for row in conn.execute(query).fetchall():
+            uname, nick, remark, alias, description, phone = row
             display = remark if remark else nick if nick else uname
             names[uname] = display
-            full.append({'username': uname, 'nick_name': nick or '', 'remark': remark or ''})
+            full.append({
+                'username': uname,
+                'nick_name': nick or '',
+                'remark': remark or '',
+                'alias': alias or '',
+                'description': description or '',
+                'phone': phone or '',
+            })
     return names, full
 
 
@@ -230,6 +259,29 @@ def _load_contact_tags():
             return _contact_tags
         except Exception:
             return {}
+
+
+def get_contact_tag_names_by_username():
+    """Return {username: [tag_name, ...]} — reverse index of `_load_contact_tags`.
+
+    Source shape is {label_id: {name, sort_order, members: [...]}}; this
+    flattens for callers that need per-contact tag lists (batch export
+    populating `contact_tags` per chat). Returns {} when no tags configured.
+    """
+    tags = _load_contact_tags()
+    if not tags:
+        return {}
+    out = {}
+    for label in tags.values():
+        tag_name = label.get('name') or ''
+        if not tag_name:
+            continue
+        for member in label.get('members', []):
+            uname = member.get('username')
+            if not uname:
+                continue
+            out.setdefault(uname, []).append(tag_name)
+    return out
 
 
 def resolve_username(chat_name):
