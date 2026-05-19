@@ -12,12 +12,22 @@
     .venv/bin/python3 -m wxdec.cli.export_chat <contact_name>
     .venv/bin/python3 -m wxdec.cli.export_chat <group_name> /tmp/out.json
 
-输出 JSON 的紧凑结构:
+输出 JSON 的紧凑结构 (schema_version=3):
     {
       "chat": "<display name>",
       "username": "<wxid 或 @chatroom>",
       "exported_at": "YYYY-MM-DD HH:MM:SS",
-      "is_group": true,          // 仅群聊出现
+      "schema_version": 3,
+      "date_first_msg": "YYYY-MM-DD HH:MM:SS",
+      "date_last_msg": "YYYY-MM-DD HH:MM:SS",
+      "contact_remark": "...",        // 仅单聊
+      "contact_nick_name": "...",     // 仅单聊
+      "contact_tags": [...],          // 仅单聊, 缺省字段省略
+      "contact_memo": "...",          // 仅单聊
+      "is_group": true,               // 仅群聊
+      "last_cursor": {                // 续跑用,按消息表分片记录
+        "Msg_<md5>": {"create_time": ..., "local_id": ...}
+      },
       "messages": [
         {"local_id": 1, "timestamp": 1713..., "sender": "me", "content": "..."},
         {"local_id": 2, "timestamp": 1713..., "sender": "<name>", "type": "voice"}
@@ -25,7 +35,7 @@
     }
 
 默认值/空值会被省略: text 消息省略 "type"，无可提取内容时省略 "content"，
-1-on-1 聊天省略 "is_group"。
+1-on-1 聊天省略 "is_group"，群聊省略所有 contact_* 字段。
 
 语音消息以 type "voice" 导出且不带 transcription 字段；运行
 transcribe_chat.py 可用 FunASR SenseVoice-Small 补齐转录。
@@ -41,244 +51,60 @@ from contextlib import closing
 from datetime import datetime
 
 from wxdec import msg_format, msg_query
-from wxdec.contact import get_contact_names
+from wxdec.cli.export_helpers import (
+    MSG_TYPE_MAP,
+    _decode_sticker_desc,
+    _extract_content,
+    _extract_refer_extras,
+    _extract_transfer_extras,
+    _format_sticker_message,
+    _format_system_message,
+    _format_video_message,
+    _msg_type_str,
+    _resolve_sender,
+)
+from wxdec.contact import (
+    get_contact_full,
+    get_contact_names,
+    get_contact_tag_names_by_username,
+)
 
 
-MSG_TYPE_MAP = {
-    1: "text",
-    3: "image",
-    34: "voice",
-    42: "contact_card",
-    43: "video",
-    47: "sticker",
-    48: "location",
-    49: "link_or_file",
-    50: "call",
-    10000: "system",
-    10002: "recall",
-}
+SCHEMA_VERSION = 3
 
 
-def _msg_type_str(local_type):
-    base, _ = msg_format._split_msg_type(local_type)
-    return MSG_TYPE_MAP.get(base, f"type_{local_type}")
-
-
-def _resolve_sender(row, ctx, names, id_to_username):
-    """Resolve the sender of a message.
-
-    Returns "me" for the logged-in user, or the sender's display name otherwise
-    (the contact's name in 1-on-1 chats, the member's name in groups). Empty
-    string for unattributable messages (e.g. system notifications).
-    """
-    local_id, local_type, create_time, real_sender_id, content, ct = row
-    decoded = msg_format._decompress_content(content, ct)
-    sender_from_content, _ = msg_format._format_message_text(
-        local_id, local_type, decoded, ctx["is_group"], ctx["username"], ctx["display_name"], names
-    )
-    label = msg_format._resolve_sender_label(
-        real_sender_id,
-        sender_from_content,
-        ctx["is_group"],
-        ctx["username"],
-        ctx["display_name"],
-        names,
-        id_to_username,
-    )
-    return label or ""
-
-
-def _decode_sticker_desc(b64_desc):
-    """WeChat encodes sticker labels as base64 protobuf: repeated (lang, text) pairs.
-    Returns the 'default' language label (usually Chinese), or None.
-
-    Limitation: treats the length byte as a single octet rather than a real protobuf
-    varint — labels >127 bytes would be misread. In practice sticker descriptions are
-    short (<30 chars), so this is adequate. Also sensitive to the bytes b"default"
-    appearing inside a preceding value; no such cases observed.
-    """
-    import base64
+def _format_msg_ts(ts):
+    """Unix timestamp → 'YYYY-MM-DD HH:MM:SS' (local time, same convention as exported_at)."""
+    if not ts:
+        return ""
     try:
-        raw = base64.b64decode(b64_desc)
-    except Exception:
-        return None
-    # Find the 'default' marker; text follows as: \x12 <varint len> <utf-8>
-    i = raw.find(b"default")
-    if i < 0 or i + 7 >= len(raw) or raw[i + 7] != 0x12:
-        return None
-    try:
-        text_len = raw[i + 8]
-        text_bytes = raw[i + 9 : i + 9 + text_len]
-        return text_bytes.decode("utf-8") or None
-    except (IndexError, UnicodeDecodeError):
-        return None
+        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, ValueError):
+        return ""
 
 
-def _format_sticker_message(content):
-    root = msg_format._parse_xml_root(content) if content else None
-    if root is None:
-        return "[表情]"
-    emoji = root.find(".//emoji")
-    if emoji is None:
-        return "[表情]"
-    desc = emoji.get("desc") or ""
-    label = _decode_sticker_desc(desc) if desc else None
-    return f"[表情] {label}" if label else "[表情]"
+def _contact_metadata_for_export(username):
+    """Look up contact metadata (remark / nick / tags / memo) for a 1-on-1 chat.
 
-
-def _format_system_message(content):
-    if not content:
-        return "[系统消息]"
-    if "<sysmsg" not in content:
-        return content
-    root = msg_format._parse_xml_root(content)
-    if root is None:
-        return content
-    inner = root.findtext(".//content")
-    return inner.strip() if inner else content
-
-
-def _format_video_message(content):
-    root = msg_format._parse_xml_root(content) if content else None
-    if root is None:
-        return "[视频]"
-    video = root.find(".//videomsg")
-    if video is None:
-        return "[视频]"
-    playlength = video.get("playlength")
-    return f"[视频] {playlength}秒" if playlength else "[视频]"
-
-
-def _extract_transfer_extras(content):
-    """Detect appmsg type=2000 and return structured transfer fields, else None.
-
-    Reuses msg_format._extract_transfer_info so the schema/version-quirks logic
-    lives in one place. Empty values are dropped to keep the export compact.
-    Numeric timestamps are returned as ints (consistent with the top-level
-    `timestamp` field), not iso strings — downstream consumers can format.
+    Returns a dict with only the keys that have non-empty values, so callers
+    can `output.update(metadata)` without polluting the JSON with empty fields.
+    Group chats should not call this — see `_resolve_chat_context['is_group']`.
     """
-    if not content or '<appmsg' not in content:
-        return None
-    root = msg_format._parse_app_message_outer(content)
-    if root is None:
-        return None
-    appmsg = root.find('.//appmsg')
-    if appmsg is None:
-        return None
-    app_type = msg_format._parse_int(
-        msg_format._collapse_text(appmsg.findtext('type') or ''), 0
-    )
-    if app_type != 2000:
-        return None
-
-    info = msg_format._extract_transfer_info(appmsg)
-    if not info:
-        return None
-
     out = {}
-    if info['paysubtype_label']:
-        out['direction'] = info['paysubtype_label']
-    for k in ('paysubtype', 'fee_desc', 'pay_memo',
-              'payer_username', 'receiver_username',
-              'transfer_id', 'transcation_id', 'pay_msg_id'):
-        v = info.get(k)
-        if v:
-            out[k] = v
-    for k in ('begin_transfer_time', 'invalid_time'):
-        v = msg_format._parse_int(info.get(k) or '', 0)
-        if v:
-            out[k] = v
-    return out or None
-
-
-def _extract_refer_extras(content):
-    """Detect appmsg type=57 and return structured refer fields, else None.
-
-    Reuses msg_format helpers (_extract_refer_info + _summarize_refer_content) so the
-    schema/inner-type-summary logic lives in one place. Empty values are
-    dropped to keep the export compact. refer_createtime is returned as int
-    (consistent with the top-level `timestamp` field).
-    """
-    if not content or '<appmsg' not in content:
-        return None
-    root = msg_format._parse_app_message_outer(content)
-    if root is None:
-        return None
-    appmsg = root.find('.//appmsg')
-    if appmsg is None:
-        return None
-    app_type = msg_format._parse_int(
-        msg_format._collapse_text(appmsg.findtext('type') or ''), 0
-    )
-    if app_type != 57:
-        return None
-
-    info = msg_format._extract_refer_info(appmsg)
-    if not info:
-        return None
-
-    out = {}
-    if info['reply_text']:
-        out['reply_text'] = info['reply_text']
-    if info['refer_type']:
-        out['refer_type'] = info['refer_type']
-        label = msg_format._REFER_INNER_TYPE_LABEL.get(info['refer_type'])
-        if label:
-            out['refer_type_label'] = label
-    summary = msg_format._summarize_refer_content(
-        info['refer_type'], info['refer_content']
-    )
-    if summary:
-        out['refer_summary'] = summary
-    for k in ('refer_svrid', 'refer_fromusr', 'refer_chatusr',
-              'refer_displayname'):
-        v = info.get(k)
-        if v:
-            out[k] = v
-    refer_ts = msg_format._parse_int(info.get('refer_createtime') or '', 0)
-    if refer_ts:
-        out['refer_createtime'] = refer_ts
-    return out or None
-
-
-def _extract_content(local_id, local_type, content, ct, chat_username, chat_display_name):
-    """Return (rendered_text, extras_dict). Either may be None.
-
-    extras carries structured fields for non-text message types where caller
-    wants more than the human-readable string. Currently transfer (type=2000)
-    and quote/refer (type=57). Future additions (视频号 metadata, merged-forward
-    expansion, …) can flow through the same channel without changing the
-    caller signature.
-    """
-    content = msg_format._decompress_content(content, ct)
-    if content is None:
-        return None, None
-
-    base, _ = msg_format._split_msg_type(local_type)
-    if base == 1:
-        return (content or ""), None
-    if base == 43:
-        return _format_video_message(content), None
-    if base == 47:
-        return _format_sticker_message(content), None
-    if base == 49:
-        rendered = msg_format._format_app_message_text(
-            content, local_type, False, chat_username, chat_display_name, {}
-        )
-        transfer = _extract_transfer_extras(content)
-        if transfer:
-            return rendered, {'type': 'transfer', 'transfer': transfer}
-        refer = _extract_refer_extras(content)
-        if refer:
-            return rendered, {'type': 'quote', 'quote': refer}
-        return rendered, None
-    if base == 50:
-        return msg_format._format_voip_message_text(content), None
-    if base == 10000:
-        return _format_system_message(content), None
-    if base == 10002:
-        return "[撤回消息]", None
-    return None, None
+    full = get_contact_full()
+    info = next((c for c in full if c.get('username') == username), None)
+    if info:
+        if info.get('remark'):
+            out['contact_remark'] = info['remark']
+        if info.get('nick_name'):
+            out['contact_nick_name'] = info['nick_name']
+        if info.get('description'):
+            out['contact_memo'] = info['description']
+    tags_by_user = get_contact_tag_names_by_username()
+    user_tags = tags_by_user.get(username)
+    if user_tags:
+        out['contact_tags'] = list(user_tags)
+    return out
 
 
 def export_chat(chat_name, output_path):
@@ -299,22 +125,34 @@ def export_chat(chat_name, output_path):
     names = get_contact_names()
 
     # Each shard has its own Name2Id table, so we must pair rows with the
-    # id_to_username map from their source DB.
+    # id_to_username map from their source DB. Track table_name per row to
+    # produce per-shard `last_cursor` for incremental resume.
     all_rows = []
+    last_cursor_per_shard = {}  # {table_name: {create_time, local_id}}
     for table_info in ctx["message_tables"]:
         db_path = table_info["db_path"]
         table_name = table_info["table_name"]
+        shard_max = None  # (create_time, local_id) max for this shard
         with closing(sqlite3.connect(db_path)) as conn:
             id_to_username = msg_format._load_name2id_maps(conn)
             rows = msg_query._query_messages(conn, table_name, limit=None, oldest_first=True)
             for row in rows:
-                all_rows.append((row, id_to_username))
+                local_id, local_type, create_time, real_sender_id, content, ct = row
+                all_rows.append((row, id_to_username, table_name))
+                cur = (create_time or 0, local_id)
+                if shard_max is None or cur > shard_max:
+                    shard_max = cur
+        if shard_max is not None:
+            last_cursor_per_shard[table_name] = {
+                "create_time": shard_max[0],
+                "local_id": shard_max[1],
+            }
 
     # Sort across shards by create_time (defensive "or 0" in case a row has NULL).
-    all_rows.sort(key=lambda pair: pair[0][2] or 0)
+    all_rows.sort(key=lambda triple: triple[0][2] or 0)
 
     messages = []
-    for row, id_to_username in all_rows:
+    for row, id_to_username, _table_name in all_rows:
         local_id, local_type, create_time, real_sender_id, content, ct = row
         sender = _resolve_sender(row, ctx, names, id_to_username)
         type_str = _msg_type_str(local_type)
@@ -347,15 +185,47 @@ def export_chat(chat_name, output_path):
         "chat": display_name,
         "username": username,
         "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "messages": messages,
+        "schema_version": SCHEMA_VERSION,
     }
+    if messages:
+        first_ts = messages[0].get("timestamp")
+        last_ts = messages[-1].get("timestamp")
+        if first_ts:
+            output["date_first_msg"] = _format_msg_ts(first_ts)
+        if last_ts:
+            output["date_last_msg"] = _format_msg_ts(last_ts)
+
     if ctx["is_group"]:
         output["is_group"] = True
+    else:
+        output.update(_contact_metadata_for_export(username))
+
+    if last_cursor_per_shard:
+        output["last_cursor"] = last_cursor_per_shard
+    output["messages"] = messages
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"Exported {len(messages)} messages to {output_path}")
+
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "export_chat",
+    # Re-exported helpers for backward compatibility with consumers that
+    # import via `wxdec.cli.export_chat.<helper>` (notably tests).
+    "MSG_TYPE_MAP",
+    "_msg_type_str",
+    "_resolve_sender",
+    "_decode_sticker_desc",
+    "_format_sticker_message",
+    "_format_system_message",
+    "_format_video_message",
+    "_extract_transfer_extras",
+    "_extract_refer_extras",
+    "_extract_content",
+]
 
 
 if __name__ == "__main__":
