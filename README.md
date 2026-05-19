@@ -47,6 +47,8 @@ sudo ./bin/find_all_keys_macos
 
 **导出朋友圈** — `python -m wxdec.cli.decrypt_sns --start YYYY-MM-DD --decrypt-media` 整理到 `sns/`。注意: **朋友圈媒体在服务端只保留几天**, `--decrypt-media` 在窗口期内把文件落到本地。更多朋友圈工具(视频补还原、采集度报告、本地缓存整理)见 `tools/` 目录。
 
+**批量导出聊天记录** — `python -m wxdec.cli.export_all_chats` 一次性导出所有会话为 JSON (schema v3, 详见 [docs/chat_export_format.md](docs/chat_export_format.md))。`--write-plan-csv plan.csv` 先生成 CSV 清单交给 WPS / Excel 编辑, 标 `export` 列 0/1 后用 `--from-plan-csv plan.csv` 按勾选导出; `-i` 按 per-shard cursor 续跑增量。需要 `filelock` (`pip install filelock`, 跨进程互斥)。**不要并发跑两个实例** —— 索引 lock 跨平台靠 filelock, 但同一目录的两次写入可能脱锚。Excel 编辑 CSV 时可能改大数字精度, 用 WPS / 文本编辑器更稳; 只要 `export` 列改对其他列不影响。中断时留 `*.partial.<pid>` 临时文件, 下次启动自动清理 (pid 死且超 1 小时)。
+
 **实时消息流** — `python main.py` 启动 `http://localhost:5678`, 浏览器看新消息推送, 图片内联预览, ~100ms 延迟。
 
 **每日定时同步** — `python -m wxdec.cli.daily_sync` 一次跑完导出 + 图片 + 最近 7 天朋友圈, 配 launchd / systemd / schtasks 当定时任务。

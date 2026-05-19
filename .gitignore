@@ -13,6 +13,11 @@ decoded_images/
 *_export*.json
 *_transcribed*.json
 
+# Batch export runtime artifacts
+*.partial.*
+_export_index.json
+_export_index.json.*.bak
+
 # Hook outputs
 hook_output.txt
 hook_start_output.txt
