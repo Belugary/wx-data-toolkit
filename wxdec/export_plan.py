@@ -607,7 +607,23 @@ def collect_plan_stats(
     range_hi = end_ts or 9_999_999_999
     out: dict[str, dict] = {}
 
-    for username in usernames:
+    # Progress reporting: scanning thousands of sessions × N shards each can
+    # take 20+ minutes on large archives. Per CLAUDE.md global rule, anything
+    # > 5 minutes MUST emit visible progress so silent runs aren't mistaken
+    # for hangs. We tick every ~50 sessions.
+    usernames = list(usernames)
+    total = len(usernames)
+    tick_every = max(1, total // 50) if total > 200 else max(1, total // 20)
+    t0 = time.time()
+
+    for i, username in enumerate(usernames):
+        if total > 100 and (i % tick_every == 0 or i == total - 1):
+            elapsed = time.time() - t0
+            eta = (elapsed / max(i, 1)) * (total - i) if i else 0
+            print(
+                f"  [{i+1}/{total}] 扫描中 (elapsed {elapsed:.0f}s, eta {eta:.0f}s)",
+                file=sys.stderr, flush=True,
+            )
         shards = _find_msg_tables_for_user(username)
         if not shards:
             out[username] = _empty_stats(
