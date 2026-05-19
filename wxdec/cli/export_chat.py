@@ -45,6 +45,7 @@ transcribe_chat.py 可用 FunASR SenseVoice-Small 补齐转录。
 完整 schema、字段语义与加载示例: docs/chat_export_format.md
 """
 import json
+import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -125,25 +126,28 @@ def export_chat(chat_name, output_path):
     names = get_contact_names()
 
     # Each shard has its own Name2Id table, so we must pair rows with the
-    # id_to_username map from their source DB. Track table_name per row to
-    # produce per-shard `last_cursor` for incremental resume.
+    # id_to_username map from their source DB. Track shard basename per row to
+    # produce per-shard `last_cursor` for incremental resume. NB: table_name is
+    # `Msg_{md5(username)}` — identical across shards for the same user — so
+    # the shard key MUST be the db basename, not table_name.
     all_rows = []
-    last_cursor_per_shard = {}  # {table_name: {create_time, local_id}}
+    last_cursor_per_shard = {}  # {db_basename: {create_time, local_id}}
     for table_info in ctx["message_tables"]:
         db_path = table_info["db_path"]
         table_name = table_info["table_name"]
+        shard_key = os.path.basename(db_path)
         shard_max = None  # (create_time, local_id) max for this shard
         with closing(sqlite3.connect(db_path)) as conn:
             id_to_username = msg_format._load_name2id_maps(conn)
             rows = msg_query._query_messages(conn, table_name, limit=None, oldest_first=True)
             for row in rows:
                 local_id, local_type, create_time, real_sender_id, content, ct = row
-                all_rows.append((row, id_to_username, table_name))
+                all_rows.append((row, id_to_username, shard_key))
                 cur = (create_time or 0, local_id)
                 if shard_max is None or cur > shard_max:
                     shard_max = cur
         if shard_max is not None:
-            last_cursor_per_shard[table_name] = {
+            last_cursor_per_shard[shard_key] = {
                 "create_time": shard_max[0],
                 "local_id": shard_max[1],
             }
@@ -152,7 +156,7 @@ def export_chat(chat_name, output_path):
     all_rows.sort(key=lambda triple: triple[0][2] or 0)
 
     messages = []
-    for row, id_to_username, _table_name in all_rows:
+    for row, id_to_username, _shard_key in all_rows:
         local_id, local_type, create_time, real_sender_id, content, ct = row
         sender = _resolve_sender(row, ctx, names, id_to_username)
         type_str = _msg_type_str(local_type)
