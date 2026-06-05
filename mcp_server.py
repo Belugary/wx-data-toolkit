@@ -902,6 +902,8 @@ def _format_app_message_text(content, local_type, is_group, chat_username, chat_
 
     if app_type == 2000:
         return _format_transfer_message_text(appmsg, title)
+    if app_type == 2001:
+        return _format_redpacket_message_text(appmsg, title)
 
     if app_type == 6:
         return f"[文件] {title}" if title else "[文件]"
@@ -1216,6 +1218,46 @@ def _format_transfer_message_text(appmsg, title):
         parts.append(info['fee_desc'])
     if info['pay_memo']:
         parts.append(f"备注: {info['pay_memo']}")
+    return ' '.join(parts)
+
+
+# 微信红包 <wcpayinfo> 里仅这两类 AA 收款在 <senderdes> 带人均额。标准微信红包的
+# 消息 XML 不含金额字段（金额在领取后才可见，不写进聊天消息）。
+_REDPACKET_AMOUNT_SCENES = frozenset({'群收款', '活动账单'})
+_REDPACKET_AMOUNT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*元')
+# 发红包人 wxid 藏在领取链接 <nativeurl> 的 sendusername= 参数里。
+_REDPACKET_SENDER_RE = re.compile(r'sendusername=([^&]+)')
+
+
+def _format_redpacket_message_text(appmsg, title):
+    """渲染微信红包（appmsg type=2001）一行展示文本，与转账渲染对称。
+
+    现状：独立红包消息走 _format_app_message_text 的 generic 分支，渲染成无信息的
+    [链接/文件]，丢掉 scenetext（场景）/ sendertitle（祝福语）/ 发红包人。
+    （_INNER_APPMSG_TYPE_LABEL 的 '2001' 标签仅在引用回复 type=57 的嵌套路径生效。）
+
+    金额：标准微信红包的消息 XML 不含金额（领取后才可见，不写进消息）；仅
+    「群收款」/「活动账单」在 <senderdes> 带人均额。
+
+    fallback：wcpayinfo 缺失 → 只显示 title 兜底，避免吞数据。
+    """
+    info = appmsg.find('wcpayinfo')
+    if info is None:
+        return f"[红包] {title}" if title else "[红包]"
+
+    scene = _collapse_text(info.findtext('scenetext') or '')
+    greeting = _collapse_text(info.findtext('sendertitle') or '')
+
+    parts = [f"[红包·{scene}]" if scene else "[红包]"]
+    if greeting:
+        parts.append(greeting)
+    if scene in _REDPACKET_AMOUNT_SCENES:
+        m = _REDPACKET_AMOUNT_RE.search(info.findtext('senderdes') or '')
+        if m:
+            parts.append(f"人均 {m.group(1)} 元")
+    sender = _REDPACKET_SENDER_RE.search(info.findtext('nativeurl') or '')
+    if sender:
+        parts.append(f"(发自 {sender.group(1)})")
     return ' '.join(parts)
 
 
